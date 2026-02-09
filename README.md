@@ -41,6 +41,7 @@ It requires **no third-party dependencies** and runs purely on built-in PowerShe
 - 🗂️ 二进制版本隔离管理（`versions/<version>/`）
 - 🔐 自动检测并设置 `secret-key`
 - 🌐 WebUI 快捷打开
+- 🔘 启动时自动打开 WebUI 开关（Auto Open WebUI）
 - 🧾 共享同一份 `config.yaml`
 - 🪶 零第三方依赖，仅需 Windows + PowerShell
 
