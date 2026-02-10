@@ -122,12 +122,24 @@ Initialize-Application
 #endregion
 
 #region Path Definitions
+$script:LocalDataRoot = if ($env:LOCALAPPDATA) {
+    $env:LOCALAPPDATA
+}
+elseif ($env:APPDATA) {
+    $env:APPDATA
+}
+else {
+    $PSScriptRoot
+}
+
 $script:Paths = @{
     BaseDir       = $PSScriptRoot
+    DataDir       = Join-Path $script:LocalDataRoot "CLIProxyAPI_Tray"
     Config        = Join-Path $PSScriptRoot "config.yaml"
     ConfigExample = Join-Path $PSScriptRoot "config.example.yaml"
     VersionsDir   = Join-Path $PSScriptRoot "versions"
     StateFile     = Join-Path $PSScriptRoot "state.json"
+    StateFileFallback = Join-Path (Join-Path $script:LocalDataRoot "CLIProxyAPI_Tray") "state.json"
     LogDir        = Join-Path $PSScriptRoot "logs"
 }
 #endregion
@@ -152,17 +164,71 @@ function Get-SystemArchitecture {
     return $(if ($arch -eq "Arm64") { "arm64" } else { "amd64" })
 }
 
+function Test-DirectoryWritable {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return $false
+        }
+
+        $testFile = Join-Path $Path (".write_test_" + [Guid]::NewGuid().ToString("N") + ".tmp")
+        try {
+            Set-Content -LiteralPath $testFile -Value "1" -Encoding ASCII -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Import-State {
     <#
     .SYNOPSIS
         Load state from JSON file
     #>
-    if (-not (Test-Path $script:Paths.StateFile)) {
+    $primaryPath = $script:Paths.StateFile
+    $fallbackPath = $script:Paths.StateFileFallback
+
+    $primaryExists = $primaryPath -and (Test-Path -LiteralPath $primaryPath)
+    $fallbackExists = $fallbackPath -and (Test-Path -LiteralPath $fallbackPath)
+
+    $statePath = $null
+    if ($primaryExists -and $fallbackExists) {
+        $primaryDir = Split-Path -Parent $primaryPath
+
+        if ($primaryDir -and (-not (Test-DirectoryWritable -Path $primaryDir))) {
+            $statePath = $fallbackPath
+        }
+        else {
+            # 两份文件都存在时优先使用最近更新的那份。
+            $primaryTime = (Get-Item -LiteralPath $primaryPath).LastWriteTimeUtc
+            $fallbackTime = (Get-Item -LiteralPath $fallbackPath).LastWriteTimeUtc
+            $statePath = if ($fallbackTime -gt $primaryTime) { $fallbackPath } else { $primaryPath }
+        }
+    }
+    elseif ($primaryExists) {
+        $statePath = $primaryPath
+    }
+    elseif ($fallbackExists) {
+        $statePath = $fallbackPath
+    }
+    else {
         return
     }
 
+    # 后续保存沿用加载到的路径，避免反复写失败或写回旧文件。
+    $script:Paths.StateFile = $statePath
+
     try {
-        $obj = Get-Content -LiteralPath $script:Paths.StateFile -Raw -ErrorAction Stop |
+        $obj = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop |
                ConvertFrom-Json
 
         if ($obj.lastChannel -in @("main", "plus")) {
@@ -195,12 +261,47 @@ function Export-State {
             updatedAt   = (Get-Date).ToString("o")
         }
 
-        $stateObject |
-            ConvertTo-Json -Compress |
-            Set-Content -LiteralPath $script:Paths.StateFile -Encoding UTF8 -ErrorAction Stop
+        $json = $stateObject | ConvertTo-Json -Compress
+
+        try {
+            $json | Set-Content -LiteralPath $script:Paths.StateFile -Encoding UTF8 -ErrorAction Stop
+            return $true
+        }
+        catch {
+            # 脚本目录可能不可写（例如放在 Program Files），则降级写到用户目录。
+            $primaryErr = $_.Exception.Message
+
+            try {
+                $fallbackPath = $script:Paths.StateFileFallback
+                $fallbackDir = Split-Path -Parent $fallbackPath
+                if ($fallbackDir) {
+                    New-Item -ItemType Directory -Path $fallbackDir -Force | Out-Null
+                }
+
+                $json | Set-Content -LiteralPath $fallbackPath -Encoding UTF8 -ErrorAction Stop
+
+                # 后续统一用可写路径，避免每次保存都失败。
+                $script:Paths.StateFile = $fallbackPath
+
+                if (-not $script:StateFileWriteFallbackNotified) {
+                    $script:StateFileWriteFallbackNotified = $true
+                    Show-BalloonTip "state.json 保存失败（$primaryErr），已改为写入：$fallbackPath" -Icon Warning -Duration 2500
+                }
+                return $true
+            }
+            catch {
+                if (-not $script:StateFileWriteFailedNotified) {
+                    $script:StateFileWriteFailedNotified = $true
+                    Show-BalloonTip "state.json 保存失败：$primaryErr" -Icon Error -Duration 2500
+                }
+                Write-Warning "Failed to save state: $primaryErr"
+                return $false
+            }
+        }
     }
     catch {
         Write-Warning "Failed to save state: $($_.Exception.Message)"
+        return $false
     }
 }
 #endregion
@@ -868,7 +969,7 @@ Download now?
                     # Use the latest existing version
                     $script:State.version = $existingVersions.Name
                     $script:State.plusTag = $existingVersions.Name
-                    Export-State
+                    Export-State | Out-Null
                     Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
                     return $true
                 }
@@ -936,7 +1037,7 @@ Download now?
             # Update state
             $script:State.version = $mainTag
             $script:State.plusTag = $plusTag
-            Export-State
+            Export-State | Out-Null
 
             Show-BalloonTip "Installed $mainTag" -Icon Info -Duration 1500
             return $true
@@ -1009,7 +1110,7 @@ function Start-Channel {
 
     # Save last channel preference
     $script:State.lastChannel = $Channel
-    Export-State
+    Export-State | Out-Null
 
     # Ensure version is installed
     if (-not (Test-VersionInstalled)) {
@@ -1108,7 +1209,7 @@ Download and install?
         $script:State.version = $null
         $script:State.plusTag = $null
         $script:State.arch = Get-SystemArchitecture
-        Export-State
+        Export-State | Out-Null
 
         # Install new version
         if (Test-VersionInstalled) {
@@ -1183,8 +1284,10 @@ function Update-TrayState {
         $script:MenuItems.CurrentStatus.Text = "Current : Main ($version)"
         $script:TrayIcon.Text = "$($script:Config.AppName) - Main"
 
-        $script:State.lastChannel = "main"
-        Export-State
+        if ($script:State.lastChannel -ne "main") {
+            $script:State.lastChannel = "main"
+            Export-State | Out-Null
+        }
 
         $script:MenuItems.Restart.Enabled = $true
         $script:MenuItems.Stop.Enabled = $true
@@ -1194,8 +1297,10 @@ function Update-TrayState {
         $script:MenuItems.CurrentStatus.Text = "Current : Plus ($plusVersion)"
         $script:TrayIcon.Text = "$($script:Config.AppName) - Plus"
 
-        $script:State.lastChannel = "plus"
-        Export-State
+        if ($script:State.lastChannel -ne "plus") {
+            $script:State.lastChannel = "plus"
+            Export-State | Out-Null
+        }
 
         $script:MenuItems.Restart.Enabled = $true
         $script:MenuItems.Stop.Enabled = $true
@@ -1294,7 +1399,7 @@ function New-TrayMenu {
     $script:MenuItems.AutoOpenWebUI.Text = "Auto Open WebUI"
     $script:MenuItems.AutoOpenWebUI.Add_Click({
         $script:State.autoOpenWebUI = -not [bool]$script:State.autoOpenWebUI
-        Export-State
+        Export-State | Out-Null
         Update-TrayState
     })
     $menu.Items.Add($script:MenuItems.AutoOpenWebUI) | Out-Null
@@ -1365,7 +1470,7 @@ Import-State
 
 if (-not $script:State.arch) {
     $script:State.arch = Get-SystemArchitecture
-    Export-State
+    Export-State | Out-Null
 }
 
 # Ensure config exists
