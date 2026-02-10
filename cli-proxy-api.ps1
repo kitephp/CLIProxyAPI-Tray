@@ -138,6 +138,7 @@ $script:State = @{
     version     = $null    # main tag e.g. v6.7.37
     plusTag     = $null    # plus tag e.g. v6.7.37-0
     arch        = $null    # amd64 | arm64
+    autoOpenWebUI = $true  # startup auto-open behavior
 }
 
 function Get-SystemArchitecture {
@@ -170,6 +171,9 @@ function Import-State {
         if ($obj.version) { $script:State.version = [string]$obj.version }
         if ($obj.plusTag) { $script:State.plusTag = [string]$obj.plusTag }
         if ($obj.arch)    { $script:State.arch = [string]$obj.arch }
+        if ($null -ne $obj.autoOpenWebUI) {
+            $script:State.autoOpenWebUI = [bool]$obj.autoOpenWebUI
+        }
     }
     catch {
         Write-Warning "Failed to load state: $($_.Exception.Message)"
@@ -187,6 +191,7 @@ function Export-State {
             version     = $script:State.version
             plusTag     = $script:State.plusTag
             arch        = $script:State.arch
+            autoOpenWebUI = [bool]$script:State.autoOpenWebUI
             updatedAt   = (Get-Date).ToString("o")
         }
 
@@ -1168,6 +1173,9 @@ function Update-TrayState {
     # Update channel checkmarks
     $script:MenuItems.ChannelMain.Checked = ($script:State.lastChannel -eq "main")
     $script:MenuItems.ChannelPlus.Checked = ($script:State.lastChannel -eq "plus")
+    if ($script:MenuItems.AutoOpenWebUI) {
+        $script:MenuItems.AutoOpenWebUI.Checked = [bool]$script:State.autoOpenWebUI
+    }
 
     # Update status display
     if ($activeChannel -eq "main") {
@@ -1282,6 +1290,15 @@ function New-TrayMenu {
     })
     $menu.Items.Add($resetPasswordItem) | Out-Null
 
+    $script:MenuItems.AutoOpenWebUI = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.AutoOpenWebUI.Text = "Auto Open WebUI"
+    $script:MenuItems.AutoOpenWebUI.Add_Click({
+        $script:State.autoOpenWebUI = -not [bool]$script:State.autoOpenWebUI
+        Export-State
+        Update-TrayState
+    })
+    $menu.Items.Add($script:MenuItems.AutoOpenWebUI) | Out-Null
+
     # Update
     $script:MenuItems.Update = New-Object System.Windows.Forms.ToolStripMenuItem
     $script:MenuItems.Update.Text = "Update"
@@ -1363,12 +1380,18 @@ Update-TrayState
 # Auto-start behavior
 if ((Get-ActiveChannel) -ne "") {
     # Already running, just open WebUI
-    Open-WebUI
+    if ($script:State.autoOpenWebUI) {
+        Open-WebUI
+    }
 }
 else {
     # Not running, ensure version and start
     if (Test-VersionInstalled) {
-        Start-Channel -Channel $script:State.lastChannel -OpenWebUIAfter
+        $startChannelParams = @{ Channel = $script:State.lastChannel }
+        if ($script:State.autoOpenWebUI) {
+            $startChannelParams.OpenWebUIAfter = $true
+        }
+        Start-Channel @startChannelParams
     }
     else {
         Update-TrayState
