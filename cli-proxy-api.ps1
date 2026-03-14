@@ -150,7 +150,7 @@ $script:State = @{
     version     = $null    # main tag e.g. v6.7.37
     plusTag     = $null    # plus tag e.g. v6.7.37-0
     arch        = $null    # amd64 | arm64
-    autoOpenWebUI = $true  # startup auto-open behavior
+    autoOpenWebUI = $true  # start/restart auto-open behavior
 }
 
 function Get-SystemArchitecture {
@@ -1097,9 +1097,7 @@ function Start-Channel {
     param(
         [Parameter(Mandatory)]
         [ValidateSet("main", "plus")]
-        [string]$Channel,
-
-        [switch]$OpenWebUIAfter
+        [string]$Channel
     )
 
     # Ensure password is configured
@@ -1145,7 +1143,7 @@ function Start-Channel {
         if ($portReady) {
             Show-BalloonTip "Started: $Channel" -Icon Info -Duration 1200
 
-            if ($OpenWebUIAfter) {
+            if ([bool]$script:State.autoOpenWebUI) {
                 Start-Sleep -Seconds 1
                 Open-WebUI
             }
@@ -1167,7 +1165,7 @@ function Restart-Channel {
     $activeChannel = Get-ActiveChannel
     $channelToStart = if ($activeChannel -ne "") { $activeChannel } else { $script:State.lastChannel }
 
-    Start-Channel -Channel $channelToStart -OpenWebUIAfter
+    Start-Channel -Channel $channelToStart
 }
 
 function Invoke-Update {
@@ -1213,7 +1211,7 @@ Download and install?
 
         # Install new version
         if (Test-VersionInstalled) {
-            Start-Channel -Channel $script:State.lastChannel -OpenWebUIAfter
+            Start-Channel -Channel $script:State.lastChannel
         }
     }
     catch {
@@ -1341,13 +1339,13 @@ function New-TrayMenu {
     $script:MenuItems.ChannelMain = New-Object System.Windows.Forms.ToolStripMenuItem
     $script:MenuItems.ChannelMain.Text = "Main"
     $script:MenuItems.ChannelMain.Add_Click({
-        Start-Channel -Channel "main" -OpenWebUIAfter
+        Start-Channel -Channel "main"
     })
 
     $script:MenuItems.ChannelPlus = New-Object System.Windows.Forms.ToolStripMenuItem
     $script:MenuItems.ChannelPlus.Text = "Plus"
     $script:MenuItems.ChannelPlus.Add_Click({
-        Start-Channel -Channel "plus" -OpenWebUIAfter
+        Start-Channel -Channel "plus"
     })
 
     $channelMenu.DropDownItems.Add($script:MenuItems.ChannelMain) | Out-Null
@@ -1455,7 +1453,7 @@ $script:TrayIcon.add_DoubleClick({
         Open-WebUI
     }
     else {
-        Start-Channel -Channel $script:State.lastChannel -OpenWebUIAfter
+        Start-Channel -Channel $script:State.lastChannel
     }
 })
 
@@ -1492,11 +1490,7 @@ if ((Get-ActiveChannel) -ne "") {
 else {
     # Not running, ensure version and start
     if (Test-VersionInstalled) {
-        $startChannelParams = @{ Channel = $script:State.lastChannel }
-        if ($script:State.autoOpenWebUI) {
-            $startChannelParams.OpenWebUIAfter = $true
-        }
-        Start-Channel @startChannelParams
+        Start-Channel -Channel $script:State.lastChannel
     }
     else {
         Update-TrayState

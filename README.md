@@ -1,162 +1,198 @@
-
 # CLIProxyAPI Tray
 
-A lightweight Windows tray manager for **CLIProxyAPI** and **CLIProxyAPI Plus**.
+> 一个给 Windows 用的托盘管理工具，用来启动和管理 `CLIProxyAPI`（Main）与 `CLIProxyAPI Plus`（Plus）。
+>
+> 这是社区项目，不是 CLIProxyAPI 官方核心仓库。
 
-> This is an **unofficial community tool**, not the core CLIProxyAPI project.
+## 这项目能做什么
 
----
+- 托盘常驻，单实例运行
+- Main / Plus 通道互斥启动与切换
+- 自动检测并下载最新可用版本
+- 版本隔离存放在 `versions/<version>/`
+- 一键打开管理页面（WebUI）
+- 自动检查并写入 `remote-management.secret-key`
+- 支持开关控制“启动/重启后是否自动打开管理页面”
 
-## 简介 / Introduction
-
-**CLIProxyAPI Tray** 是一个基于 Windows 系统的轻量级托盘管理工具，用于管理  
-**CLIProxyAPI（Main）** 和 **CLIProxyAPI Plus（Plus）** 两个版本。
-
-无需安装第三方依赖，仅使用系统自带的 PowerShell，即可实现：
-- 托盘运行
-- 通道切换（Main / Plus）
-- 自动下载与更新
-- 版本隔离管理
-- WebUI 快速访问
-- 配置文件与密码管理
-
-**CLIProxyAPI Tray** is a lightweight Windows tray manager for  
-**CLIProxyAPI (Main)** and **CLIProxyAPI Plus (Plus)**.
-
-It requires **no third-party dependencies** and runs purely on built-in PowerShell, providing:
-- Tray icon management
-- Main / Plus channel switching
-- Automatic download & update
-- Version-isolated binaries
-- Quick WebUI access
-- Configuration & password management
-
----
-
-## 功能特性 / Features
-
-- 🧷 Windows 托盘图标（单实例运行）
-- 🔁 Main / Plus 通道切换（互斥运行）
-- ⬇️ 从 GitHub Releases 自动下载与更新
-- 🗂️ 二进制版本隔离管理（`versions/<version>/`）
-- 🔐 自动检测并设置 `secret-key`
-- 🌐 WebUI 快捷打开
-- 🔘 启动时自动打开 WebUI 开关（Auto Open WebUI）
-- 🧾 共享同一份 `config.yaml`
-- 🪶 零第三方依赖，仅需 Windows + PowerShell
-
----
-
-## 系统要求 / Requirements
+## 环境要求
 
 - Windows 10 / Windows 11
 - PowerShell 5.1 或更高版本
-- 网络访问 GitHub Releases
+- 能访问 GitHub Releases
 
----
+## 快速开始（推荐）
 
-## 目录结构 / Folder Structure
+### 方式 A：普通用户（桌面快捷方式）
+
+1. 下载并放到同一目录：
+   - `cli-proxy-api.ps1`
+   - `cli-proxy-api.vbs`
+   - `create-shortcut.bat`
+   - `config.example.yaml`
+2. 双击运行 `create-shortcut.bat`
+3. 桌面会生成 `CLIProxyAPI Tray` 快捷方式
+4. 以后直接双击桌面快捷方式启动
+
+### 方式 B：开发者（直接运行脚本）
+
+```powershell
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File .\cli-proxy-api.ps1
+```
+
+## 首次运行会发生什么
+
+首次启动时，脚本会按顺序做这些事：
+
+1. 检查是否已有实例在运行（避免多开）
+2. 若 `config.yaml` 不存在，则从 `config.example.yaml` 自动复制
+3. 检查 `remote-management.secret-key`
+   - 为空时会弹窗让你输入密码，并写回 `config.yaml`
+4. 检查当前版本是否已安装
+   - 未安装时会询问是否下载 Main/Plus 最新版本
+5. 按 `lastChannel` 启动服务并更新托盘状态
+
+## 日常使用说明
+
+### 托盘菜单
+
+- `Channel -> Main`：启动 Main
+- `Channel -> Plus`：启动 Plus
+- `Open -> WebUI`：打开 `http://127.0.0.1:<port>/management.html`
+- `Open -> Folder`：打开脚本目录
+- `Reset Password`：重置 `secret-key`
+- `Auto Open WebUI`：切换“启动/重启后自动开页”
+- `Update`：检查并安装最新版本
+- `Restart`：重启当前运行通道；若未运行则启动 `lastChannel`
+- `Stop`：停止 Main/Plus 进程
+- `Exit`：退出托盘并停止进程
+
+### 托盘双击行为
+
+- 当前有服务在运行：直接打开 WebUI
+- 当前没有服务在运行：启动 `lastChannel`
+
+## Auto Open WebUI 开关说明（重要）
+
+当前实现里，这个开关只影响“自动打开”行为：
+
+- 会影响：
+  - 通过 `Channel` 启动后是否自动开页
+  - `Restart` 后是否自动开页
+  - `Update` 安装完成后重启时是否自动开页
+  - 脚本启动时（检测到已运行）是否自动开页
+- 不会影响：
+  - 手动点击 `Open -> WebUI`
+  - 托盘双击且当前已运行时的开页动作
+
+## 目录结构
 
 ```text
 CLIProxyAPI_Tray/
 ├─ cli-proxy-api.ps1
+├─ cli-proxy-api.vbs
+├─ create-shortcut.bat
 ├─ config.example.yaml
 ├─ README.md
-├─ LICENSE
-└─ .gitignore
-````
+└─ LICENSE
+```
 
-运行后会自动生成：
+运行后通常会出现：
 
 ```text
 CLIProxyAPI_Tray/
 ├─ config.yaml
 ├─ state.json
-└─ versions/
-   └─ v6.7.37/
-      ├─ cli-proxy-api.exe
-      └─ cli-proxy-api-plus.exe
+├─ versions/
+│  └─ vX.Y.Z/
+│     ├─ cli-proxy-api.exe
+│     └─ cli-proxy-api-plus.exe
+└─ logs/                     # 仅在 config 开启 logging-to-file 时写入
 ```
 
-* **方式一：Git clone**
-* **方式二：手动下载 + 一键生成桌面快捷方式**
+## 状态文件与数据路径
 
-下面是**可直接整体替换 README 中对应部分的版本**（我保持了你之前 README 的整体结构，只改了 Quick Start 相关内容）。
+- 主状态文件：`<脚本目录>\state.json`
+- 回退状态文件：`%LOCALAPPDATA%\CLIProxyAPI_Tray\state.json`
+  - 当脚本目录不可写时会自动回退
+- 版本目录：`<脚本目录>\versions\<mainTag>\`
 
----
+`state.json` 主要字段：
 
-## 快速开始 / Quick Start
+- `lastChannel`
+- `version`
+- `plusTag`
+- `arch`
+- `autoOpenWebUI`
+- `updatedAt`
 
-CLIProxyAPI Tray 提供 **两种使用方式**，适合不同用户习惯。
+## 最小配置建议
 
-CLIProxyAPI Tray provides **two ways to get started**, depending on your preference.
+建议至少确认这几个配置项：
 
----
-
-### 方法一：使用 Git Clone
-
-```bash
-git clone https://github.com/kitephp/CLIProxyAPI_Tray.git
-cd CLIProxyAPI_Tray
-````
-
-将主仓库的示例配置复制到当前目录：
-
-```text
-config.example.yaml
+```yaml
+port: 8317
+show-update-progress: true
+remote-management:
+  allow-remote: false
+  secret-key: "请设置一个强密码"
 ```
 
-然后运行托盘脚本：
+说明：
 
-```powershell
-powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File cli-proxy-api.ps1
-```
+- `port`：WebUI 与服务监听端口
+- `show-update-progress`：是否显示下载进度窗口
+- `remote-management.secret-key`：管理接口密钥，不能为空
 
----
+## 更新与版本管理机制
 
-### 方法二：手动下载 + 一键生成桌面快捷方式
+- 点击 `Update` 才会检查更新，不会后台定时更新
+- 更新会同时处理 Main/Plus 的对应发布包
+- 已下载版本会保留，不会自动清理旧版本目录
+- 下载失败时只清理临时目录，不会删已有版本
 
-1️⃣ 从 GitHub 下载以下文件，并放入同一目录：
+## 常见问题（FAQ）
 
-* `cli-proxy-api.ps1`
-* `config.example.yaml`
-* `create-shortcut.bat`
+### 1. 托盘没出现
 
-2️⃣ **双击运行 `create-shortcut.bat`**
+- 先确认没有重复实例在运行
+- 用 PowerShell 手动执行一次脚本，看是否有安全策略或权限提示
 
-* 会自动在桌面创建快捷方式：
-  **CLIProxyAPI Tray**
-* 快捷方式会以隐藏窗口方式运行托盘脚本
-* 工作目录自动指向脚本所在目录
+### 2. WebUI 打不开
 
-3️⃣ 双击桌面快捷方式启动托盘
+- 确认服务已启动（托盘状态不是 `Not Running`）
+- 确认 `config.yaml` 里的 `port`，再访问 `http://127.0.0.1:<port>/management.html`
 
----
+### 3. 首次启动一直让输密码
 
-### 首次运行行为 / First Run Behavior
+- 检查 `config.yaml` 是否可写
+- 确认 `remote-management.secret-key` 已成功写入
 
-首次运行时，CLIProxyAPI Tray 会自动执行以下操作：
+### 4. 更新下载失败
 
-* 如果 `config.yaml` 不存在：
+- 检查网络是否可访问 GitHub Releases
+- 若在公司网络环境，检查代理或防火墙策略
 
-  * 自动从 `config.example.yaml` 复制生成
-* 如果 `remote-management.secret-key` 为空：
+### 5. state.json 保存失败
 
-  * 自动弹窗要求输入密码
-* 如果未安装 CLIProxyAPI：
+- 把项目放到当前用户有写权限的目录
+- 脚本也会尝试自动回退到 `%LOCALAPPDATA%\CLIProxyAPI_Tray\state.json`
 
-  * 自动检测最新版本
-  * 询问是否下载并安装
+## 重置与卸载
 
-On first launch, CLIProxyAPI Tray will:
+1. 托盘菜单点 `Exit`
+2. 删除桌面快捷方式（如果你是用 bat 创建的）
+3. 按需删除以下文件/目录：
+   - `config.yaml`
+   - `state.json`
+   - `versions/`
+   - `logs/`
 
-* Create `config.yaml` from `config.example.yaml` if missing
-* Prompt for `remote-management.secret-key` if empty
-* Detect and download the latest CLIProxyAPI version if not installed
+## 许可证
 
----
+本项目采用 [MIT License](./LICENSE)。
 
-### 启动方式总结 / Launch Summary
+## 反馈
 
-* **开发者**：直接运行 `cli-proxy-api.ps1`
-* **普通用户**：运行一次 `create-shortcut.bat`，以后只需双击桌面快捷方式
+有问题或建议，欢迎提 Issue：
+
+- https://github.com/kitephp/CLIProxyAPI_Tray/issues
