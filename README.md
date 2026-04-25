@@ -1,13 +1,12 @@
 # CLIProxyAPI Tray
 
-> 一个给 Windows 用的托盘管理工具，用来启动和管理 `CLIProxyAPI`（Main）与 `CLIProxyAPI Plus`（Plus）。
+> 一个给 Windows 用的托盘管理工具，用来启动和管理 `CLIProxyAPI`。
 >
 > 这是社区项目，不是 CLIProxyAPI 官方核心仓库。
 
 ## 这项目能做什么
 
 - 托盘常驻，单实例运行
-- Main / Plus 通道互斥启动与切换
 - 自动检测并下载最新可用版本
 - 版本隔离存放在 `versions/<version>/`
 - 一键打开管理页面（WebUI）
@@ -48,35 +47,34 @@ powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File .\cli-pr
 3. 检查 `remote-management.secret-key`
    - 为空时会弹窗让你输入密码，并写回 `config.yaml`
 4. 检查当前版本是否已安装
-   - 未安装时会询问是否下载 Main/Plus 最新版本
-5. 按 `lastChannel` 启动服务并更新托盘状态
+   - 未安装时会询问是否下载最新版本
+5. 启动服务并更新托盘状态
 
 ## 日常使用说明
 
 ### 托盘菜单
 
-- `Channel -> Main`：启动 Main
-- `Channel -> Plus`：启动 Plus
+- `Start`：启动 CLIProxyAPI
 - `Open -> WebUI`：打开 `http://127.0.0.1:<port>/management.html`
 - `Open -> Folder`：打开脚本目录
 - `Reset Password`：重置 `secret-key`
 - `Auto Open WebUI`：切换“启动/重启后自动开页”
 - `Update`：检查并安装最新版本
-- `Restart`：重启当前运行通道；若未运行则启动 `lastChannel`
-- `Stop`：停止 Main/Plus 进程
+- `Restart`：重启 CLIProxyAPI
+- `Stop`：停止 CLIProxyAPI 进程
 - `Exit`：退出托盘并停止进程
 
 ### 托盘双击行为
 
 - 当前有服务在运行：直接打开 WebUI
-- 当前没有服务在运行：启动 `lastChannel`
+- 当前没有服务在运行：启动 CLIProxyAPI
 
 ## Auto Open WebUI 开关说明（重要）
 
 当前实现里，这个开关只影响“自动打开”行为：
 
 - 会影响：
-  - 通过 `Channel` 启动后是否自动开页
+  - 启动后是否自动开页
   - `Restart` 后是否自动开页
   - `Update` 安装完成后重启时是否自动开页
   - 脚本启动时（检测到已运行）是否自动开页
@@ -104,8 +102,7 @@ CLIProxyAPI_Tray/
 ├─ state.json
 ├─ versions/
 │  └─ vX.Y.Z/
-│     ├─ cli-proxy-api.exe
-│     └─ cli-proxy-api-plus.exe
+│     └─ cli-proxy-api.exe
 └─ logs/                     # 仅在 config 开启 logging-to-file 时写入
 ```
 
@@ -118,9 +115,7 @@ CLIProxyAPI_Tray/
 
 `state.json` 主要字段：
 
-- `lastChannel`
 - `version`
-- `plusTag`
 - `arch`
 - `autoOpenWebUI`
 - `updatedAt`
@@ -146,7 +141,6 @@ remote-management:
 ## 更新与版本管理机制
 
 - 点击 `Update` 才会检查更新，不会后台定时更新
-- 更新会同时处理 Main/Plus 的对应发布包
 - 已下载版本会保留，不会自动清理旧版本目录
 - 下载失败时只清理临时目录，不会删已有版本
 

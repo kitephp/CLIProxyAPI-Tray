@@ -26,11 +26,9 @@ $script:Config = @{
 
     # GitHub Repositories
     MainRepo = "router-for-me/CLIProxyAPI"
-    PlusRepo = "router-for-me/CLIProxyAPIPlus"
 
     # Process Names (without .exe)
     MainProcess = "cli-proxy-api"
-    PlusProcess = "cli-proxy-api-plus"
 
     # Default Values
     DefaultPort = 8317
@@ -146,9 +144,7 @@ $script:Paths = @{
 
 #region State Management
 $script:State = @{
-    lastChannel = "main"   # main | plus
     version     = $null    # main tag e.g. v6.7.37
-    plusTag     = $null    # plus tag e.g. v6.7.37-0
     arch        = $null    # amd64 | arm64
     autoOpenWebUI = $true  # start/restart auto-open behavior
 }
@@ -231,11 +227,7 @@ function Import-State {
         $obj = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop |
                ConvertFrom-Json
 
-        if ($obj.lastChannel -in @("main", "plus")) {
-            $script:State.lastChannel = [string]$obj.lastChannel
-        }
         if ($obj.version) { $script:State.version = [string]$obj.version }
-        if ($obj.plusTag) { $script:State.plusTag = [string]$obj.plusTag }
         if ($obj.arch)    { $script:State.arch = [string]$obj.arch }
         if ($null -ne $obj.autoOpenWebUI) {
             $script:State.autoOpenWebUI = [bool]$obj.autoOpenWebUI
@@ -253,9 +245,7 @@ function Export-State {
     #>
     try {
         $stateObject = [PSCustomObject]@{
-            lastChannel = $script:State.lastChannel
             version     = $script:State.version
-            plusTag     = $script:State.plusTag
             arch        = $script:State.arch
             autoOpenWebUI = [bool]$script:State.autoOpenWebUI
             updatedAt   = (Get-Date).ToString("o")
@@ -679,14 +669,10 @@ function Wait-PortListening {
 function Get-ActiveChannel {
     <#
     .SYNOPSIS
-        Detect which channel is currently running
+        Detect if CLIProxyAPI is currently running
     .OUTPUTS
-        String - "main", "plus", or "" if neither
+        String - "main" if running, or "" if not
     #>
-    if (Get-Process -Name $script:Config.PlusProcess -ErrorAction SilentlyContinue) {
-        return "plus"
-    }
-
     if (Get-Process -Name $script:Config.MainProcess -ErrorAction SilentlyContinue) {
         return "main"
     }
@@ -697,22 +683,14 @@ function Get-ActiveChannel {
 function Stop-AllChannels {
     <#
     .SYNOPSIS
-        Stop all running channel processes
+        Stop CLIProxyAPI process
     #>
     try {
         Get-Process -Name $script:Config.MainProcess -ErrorAction SilentlyContinue |
             Stop-Process -Force
     }
     catch {
-        Write-Verbose "No main process to stop"
-    }
-
-    try {
-        Get-Process -Name $script:Config.PlusProcess -ErrorAction SilentlyContinue |
-            Stop-Process -Force
-    }
-    catch {
-        Write-Verbose "No plus process to stop"
+        Write-Verbose "No process to stop"
     }
 
     Start-Sleep -Milliseconds 200
@@ -782,7 +760,7 @@ function Get-GitHubAssetUrl {
 function Invoke-PackageDownload {
     <#
     .SYNOPSIS
-        Download both Main and Plus packages with optional progress UI
+        Download CLIProxyAPI package with optional progress UI
     #>
     param(
         [Parameter(Mandatory)]
@@ -790,12 +768,6 @@ function Invoke-PackageDownload {
 
         [Parameter(Mandatory)]
         [string]$MainOutputPath,
-
-        [Parameter(Mandatory)]
-        [string]$PlusUrl,
-
-        [Parameter(Mandatory)]
-        [string]$PlusOutputPath,
 
         [bool]$ShowProgress = $true
     )
@@ -806,11 +778,8 @@ function Invoke-PackageDownload {
         $webClient.Headers.Add("User-Agent", $script:Config.AppName)
 
         try {
-            Show-BalloonTip "Downloading Main..." -Icon Info -Duration 1200
+            Show-BalloonTip "Downloading CLIProxyAPI..." -Icon Info -Duration 1200
             $webClient.DownloadFile($MainUrl, $MainOutputPath)
-
-            Show-BalloonTip "Downloading Plus..." -Icon Info -Duration 1200
-            $webClient.DownloadFile($PlusUrl, $PlusOutputPath)
         }
         finally {
             $webClient.Dispose()
@@ -843,14 +812,12 @@ function Invoke-PackageDownload {
     $webClient.Headers.Add("User-Agent", $script:Config.AppName)
 
     # Download state
-    $script:CurrentDownload = "main"
     $script:DownloadError = $null
 
     # Progress event
     $webClient.add_DownloadProgressChanged({
         param($sender, $e)
-        $channelName = if ($script:CurrentDownload -eq "main") { "Main" } else { "Plus" }
-        $label.Text = "Downloading ${channelName}: $($e.ProgressPercentage)%  ($([math]::Round($e.BytesReceived / 1MB, 1)) MB / $([math]::Round($e.TotalBytesToReceive / 1MB, 1)) MB)"
+        $label.Text = "Downloading: $($e.ProgressPercentage)%  ($([math]::Round($e.BytesReceived / 1MB, 1)) MB / $([math]::Round($e.TotalBytesToReceive / 1MB, 1)) MB)"
     })
 
     # Completion event
@@ -863,26 +830,11 @@ function Invoke-PackageDownload {
             return
         }
 
-        if ($script:CurrentDownload -eq "main") {
-            # Start Plus download
-            $script:CurrentDownload = "plus"
-            $label.Text = "Starting Plus download..."
-
-            try {
-                $webClient.DownloadFileAsync($PlusUrl, $PlusOutputPath)
-            }
-            catch {
-                $script:DownloadError = $_.Exception
-                $form.Close()
-            }
-        }
-        else {
-            # Both downloads complete
-            $form.Close()
-        }
+        # Download complete
+        $form.Close()
     })
 
-    # Start Main download when form is shown
+    # Start download when form is shown
     $form.add_Shown({
         try {
             $webClient.DownloadFileAsync($MainUrl, $MainOutputPath)
@@ -919,9 +871,8 @@ function Test-VersionInstalled {
     if ($script:State.version) {
         $versionDir = Join-Path $script:Paths.VersionsDir $script:State.version
         $mainExe = Join-Path $versionDir "cli-proxy-api.exe"
-        $plusExe = Join-Path $versionDir "cli-proxy-api-plus.exe"
 
-        if ((Test-Path $mainExe) -and (Test-Path $plusExe)) {
+        if (Test-Path $mainExe) {
             return $true
         }
     }
@@ -931,7 +882,6 @@ function Test-VersionInstalled {
 
     try {
         $mainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
-        $plusTag = Get-LatestGitHubTag -Repository $script:Config.PlusRepo
         $mainVersion = $mainTag.TrimStart("v")
 
         $script:State.arch = $arch
@@ -940,8 +890,7 @@ function Test-VersionInstalled {
 No version installed.
 
 Latest:
-Main: $mainTag
-Plus: $plusTag
+CLIProxyAPI: $mainTag
 Architecture: $arch
 
 Download now?
@@ -959,8 +908,7 @@ Download now?
             if (Test-Path $script:Paths.VersionsDir) {
                 $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
                                     Where-Object {
-                                        (Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")) -and
-                                        (Test-Path (Join-Path $_.FullName "cli-proxy-api-plus.exe"))
+                                        Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")
                                     } |
                                     Sort-Object Name -Descending |
                                     Select-Object -First 1
@@ -968,7 +916,6 @@ Download now?
                 if ($existingVersions) {
                     # Use the latest existing version
                     $script:State.version = $existingVersions.Name
-                    $script:State.plusTag = $existingVersions.Name
                     Export-State | Out-Null
                     Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
                     return $true
@@ -983,9 +930,7 @@ Download now?
         New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
 
         # Build asset names
-        $plusVersion = $plusTag.TrimStart("v")
         $mainZipName = "CLIProxyAPI_${mainVersion}_windows_${arch}.zip"
-        $plusZipName = "CLIProxyAPIPlus_${plusVersion}_windows_${arch}.zip"
 
         # Create temp directory
         $tempDir = Join-Path $env:TEMP ("cliproxy_update_" + [Guid]::NewGuid().ToString("N"))
@@ -996,35 +941,25 @@ Download now?
         try {
             # Get download URLs
             $mainUrl = Get-GitHubAssetUrl -Repository $script:Config.MainRepo -AssetName $mainZipName
-            $plusUrl = Get-GitHubAssetUrl -Repository $script:Config.PlusRepo -AssetName $plusZipName
 
             $mainZipPath = Join-Path $tempDir $mainZipName
-            $plusZipPath = Join-Path $tempDir $plusZipName
 
             # Download
             Invoke-PackageDownload -MainUrl $mainUrl -MainOutputPath $mainZipPath `
-                                   -PlusUrl $plusUrl -PlusOutputPath $plusZipPath `
                                    -ShowProgress $showProgress
 
             # Extract
             $mainExtractDir = Join-Path $tempDir "main"
-            $plusExtractDir = Join-Path $tempDir "plus"
 
             Show-BalloonTip "Extracting files..." -Icon Info -Duration 1200
             Expand-Archive -LiteralPath $mainZipPath -DestinationPath $mainExtractDir -Force
-            Expand-Archive -LiteralPath $plusZipPath -DestinationPath $plusExtractDir -Force
 
-            # Find executables
+            # Find executable
             $mainExeFile = Get-ChildItem -Path $mainExtractDir -Recurse -Filter "*.exe" |
-                           Select-Object -First 1
-            $plusExeFile = Get-ChildItem -Path $plusExtractDir -Recurse -Filter "*.exe" |
                            Select-Object -First 1
 
             if (-not $mainExeFile) {
-                throw "Main executable not found in downloaded package"
-            }
-            if (-not $plusExeFile) {
-                throw "Plus executable not found in downloaded package"
+                throw "Executable not found in downloaded package"
             }
 
             # Stop running processes
@@ -1032,11 +967,9 @@ Download now?
 
             # Copy to version directory
             Copy-Item -LiteralPath $mainExeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api.exe") -Force
-            Copy-Item -LiteralPath $plusExeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api-plus.exe") -Force
 
             # Update state
             $script:State.version = $mainTag
-            $script:State.plusTag = $plusTag
             Export-State | Out-Null
 
             Show-BalloonTip "Installed $mainTag" -Icon Info -Duration 1500
@@ -1061,29 +994,18 @@ Download now?
     }
 }
 
-function Get-ChannelExecutablePath {
+function Get-ExecutablePath {
     <#
     .SYNOPSIS
-        Get executable path for specified channel
+        Get CLIProxyAPI executable path
     .OUTPUTS
         String - Full path to executable, or $null if not found
     #>
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet("main", "plus")]
-        [string]$Channel
-    )
-
     if (-not $script:State.version) {
         return $null
     }
 
     $versionDir = Join-Path $script:Paths.VersionsDir $script:State.version
-
-    if ($Channel -eq "plus") {
-        return (Join-Path $versionDir "cli-proxy-api-plus.exe")
-    }
-
     return (Join-Path $versionDir "cli-proxy-api.exe")
 }
 #endregion
@@ -1092,23 +1014,13 @@ function Get-ChannelExecutablePath {
 function Start-Channel {
     <#
     .SYNOPSIS
-        Start a specific channel (main or plus)
+        Start CLIProxyAPI
     #>
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet("main", "plus")]
-        [string]$Channel
-    )
-
     # Ensure password is configured
     if (-not (Test-PasswordConfigured)) {
         Show-BalloonTip "Password not set. Start cancelled." -Icon Warning -Duration 2000
         return
     }
-
-    # Save last channel preference
-    $script:State.lastChannel = $Channel
-    Export-State | Out-Null
 
     # Ensure version is installed
     if (-not (Test-VersionInstalled)) {
@@ -1116,14 +1028,14 @@ function Start-Channel {
     }
 
     # Get executable path
-    $exePath = Get-ChannelExecutablePath -Channel $Channel
+    $exePath = Get-ExecutablePath
 
     if (-not $exePath -or -not (Test-Path $exePath)) {
         Show-BalloonTip "Executable not found for current version" -Icon Error -Duration 2500
         return
     }
 
-    # Stop any running channels
+    # Stop any running processes
     Stop-AllChannels
 
     # Build arguments
@@ -1141,7 +1053,7 @@ function Start-Channel {
         Update-TrayState
 
         if ($portReady) {
-            Show-BalloonTip "Started: $Channel" -Icon Info -Duration 1200
+            Show-BalloonTip "Started: CLIProxyAPI" -Icon Info -Duration 1200
 
             if ([bool]$script:State.autoOpenWebUI) {
                 Start-Sleep -Seconds 1
@@ -1160,12 +1072,9 @@ function Start-Channel {
 function Restart-Channel {
     <#
     .SYNOPSIS
-        Restart currently active or last used channel
+        Restart CLIProxyAPI
     #>
-    $activeChannel = Get-ActiveChannel
-    $channelToStart = if ($activeChannel -ne "") { $activeChannel } else { $script:State.lastChannel }
-
-    Start-Channel -Channel $channelToStart
+    Start-Channel
 }
 
 function Invoke-Update {
@@ -1175,7 +1084,6 @@ function Invoke-Update {
     #>
     try {
         $latestMainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
-        $latestPlusTag = Get-LatestGitHubTag -Repository $script:Config.PlusRepo
 
         # Check if already up to date
         if ($script:State.version -and ($script:State.version -eq $latestMainTag)) {
@@ -1185,8 +1093,7 @@ function Invoke-Update {
 
         $message = @"
 New version found:
-Main: $latestMainTag
-Plus: $latestPlusTag
+CLIProxyAPI: $latestMainTag
 
 Download and install?
 "@
@@ -1205,13 +1112,12 @@ Download and install?
 
         # Clear version to force new install
         $script:State.version = $null
-        $script:State.plusTag = $null
         $script:State.arch = Get-SystemArchitecture
         Export-State | Out-Null
 
         # Install new version
         if (Test-VersionInstalled) {
-            Start-Channel -Channel $script:State.lastChannel
+            Start-Channel
         }
     }
     catch {
@@ -1265,13 +1171,11 @@ function Open-ApplicationFolder {
 function Update-TrayState {
     <#
     .SYNOPSIS
-        Update tray icon and menu state based on running channel
+        Update tray icon and menu state based on running status
     #>
     $activeChannel = Get-ActiveChannel
 
-    # Update channel checkmarks
-    $script:MenuItems.ChannelMain.Checked = ($script:State.lastChannel -eq "main")
-    $script:MenuItems.ChannelPlus.Checked = ($script:State.lastChannel -eq "plus")
+    # Update auto-open checkmark
     if ($script:MenuItems.AutoOpenWebUI) {
         $script:MenuItems.AutoOpenWebUI.Checked = [bool]$script:State.autoOpenWebUI
     }
@@ -1279,26 +1183,8 @@ function Update-TrayState {
     # Update status display
     if ($activeChannel -eq "main") {
         $version = if ($script:State.version) { $script:State.version } else { "v?" }
-        $script:MenuItems.CurrentStatus.Text = "Current : Main ($version)"
-        $script:TrayIcon.Text = "$($script:Config.AppName) - Main"
-
-        if ($script:State.lastChannel -ne "main") {
-            $script:State.lastChannel = "main"
-            Export-State | Out-Null
-        }
-
-        $script:MenuItems.Restart.Enabled = $true
-        $script:MenuItems.Stop.Enabled = $true
-    }
-    elseif ($activeChannel -eq "plus") {
-        $plusVersion = if ($script:State.plusTag) { $script:State.plusTag } else { "v?-0" }
-        $script:MenuItems.CurrentStatus.Text = "Current : Plus ($plusVersion)"
-        $script:TrayIcon.Text = "$($script:Config.AppName) - Plus"
-
-        if ($script:State.lastChannel -ne "plus") {
-            $script:State.lastChannel = "plus"
-            Export-State | Out-Null
-        }
+        $script:MenuItems.CurrentStatus.Text = "Current : CLIProxyAPI ($version)"
+        $script:TrayIcon.Text = "$($script:Config.AppName)"
 
         $script:MenuItems.Restart.Enabled = $true
         $script:MenuItems.Stop.Enabled = $true
@@ -1332,25 +1218,11 @@ function New-TrayMenu {
 
     $menu.Items.Add("-") | Out-Null
 
-    # Channel submenu
-    $channelMenu = New-Object System.Windows.Forms.ToolStripMenuItem
-    $channelMenu.Text = "Channel"
-
-    $script:MenuItems.ChannelMain = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.ChannelMain.Text = "Main"
-    $script:MenuItems.ChannelMain.Add_Click({
-        Start-Channel -Channel "main"
-    })
-
-    $script:MenuItems.ChannelPlus = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.ChannelPlus.Text = "Plus"
-    $script:MenuItems.ChannelPlus.Add_Click({
-        Start-Channel -Channel "plus"
-    })
-
-    $channelMenu.DropDownItems.Add($script:MenuItems.ChannelMain) | Out-Null
-    $channelMenu.DropDownItems.Add($script:MenuItems.ChannelPlus) | Out-Null
-    $menu.Items.Add($channelMenu) | Out-Null
+    # Start CLIProxyAPI
+    $startItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $startItem.Text = "Start"
+    $startItem.Add_Click({ Start-Channel })
+    $menu.Items.Add($startItem) | Out-Null
 
     # Open submenu
     $openMenu = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1453,7 +1325,7 @@ $script:TrayIcon.add_DoubleClick({
         Open-WebUI
     }
     else {
-        Start-Channel -Channel $script:State.lastChannel
+        Start-Channel
     }
 })
 
@@ -1490,7 +1362,7 @@ if ((Get-ActiveChannel) -ne "") {
 else {
     # Not running, ensure version and start
     if (Test-VersionInstalled) {
-        Start-Channel -Channel $script:State.lastChannel
+        Start-Channel
     }
     else {
         Update-TrayState
