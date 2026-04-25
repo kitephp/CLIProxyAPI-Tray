@@ -717,6 +717,80 @@ function Get-GitHubHeaders {
     return $headers
 }
 
+function Get-GitHubTagFromHtml {
+    <#
+    .SYNOPSIS
+        Parse latest release tag from GitHub releases HTML page
+    .PARAMETER Repository
+        Repository in format "owner/repo"
+    .OUTPUTS
+        String - The latest tag name
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Repository
+    )
+
+    try {
+        $url = "https://github.com/$Repository/releases/latest"
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -ErrorAction Stop
+        $html = $response.Content
+
+        if ($html -match 'href="/' + $Repository.Replace('/', '/') + '/releases/tag/([^"]+)"') {
+            return $Matches[1]
+        }
+
+        throw "Could not parse release tag from HTML"
+    }
+    catch {
+        throw "Failed to get release tag from HTML: $($_.Exception.Message)"
+    }
+}
+
+function Get-GitHubAssetUrlFromHtml {
+    <#
+    .SYNOPSIS
+        Parse latest release asset download URL from GitHub releases HTML page
+    .PARAMETER Repository
+        Repository in format "owner/repo"
+    .PARAMETER AssetName
+        Asset file name to find
+    .OUTPUTS
+        String - The download URL
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Repository,
+
+        [Parameter(Mandatory)]
+        [string]$AssetName
+    )
+
+    try {
+        $url = "https://github.com/$Repository/releases/latest"
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -ErrorAction Stop
+        $html = $response.Content
+
+        $escapedAsset = [regex]::Escape($AssetName)
+        if ($html -match 'href="([^"]+' + $escapedAsset + ')"[^>]*>.*?(\d+\.\d+\s+\w+)') {
+            $downloadUrl = $Matches[1]
+            if ($downloadUrl -notmatch '^https?://') {
+                $downloadUrl = "https://github.com" + $downloadUrl
+            }
+            return $downloadUrl
+        }
+
+        if ($html -match '(https?://github\.com/' + $Repository.Replace('/', '/') + '/releases/download/[^"+\s]+\+' + $escapedAsset + ')') {
+            return $Matches[1]
+        }
+
+        throw "Asset not found: $AssetName"
+    }
+    catch {
+        throw "Failed to get asset URL from HTML: $($_.Exception.Message)"
+    }
+}
+
 function Get-LatestGitHubTag {
     <#
     .SYNOPSIS
@@ -740,7 +814,7 @@ function Get-LatestGitHubTag {
     }
     catch {
         if ($_.Exception.Message -match "403") {
-            throw "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable or add github-token in config.yaml"
+            return Get-GitHubTagFromHtml -Repository $Repository
         }
         throw "Failed to get latest tag from $Repository : $($_.Exception.Message)"
     }
@@ -776,7 +850,7 @@ function Get-GitHubAssetUrl {
     }
     catch {
         if ($_.Exception.Message -match "403") {
-            throw "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable or add github-token in config.yaml"
+            return Get-GitHubAssetUrlFromHtml -Repository $Repository -AssetName $AssetName
         }
         throw "Failed to get asset URL for $AssetName : $($_.Exception.Message)"
     }

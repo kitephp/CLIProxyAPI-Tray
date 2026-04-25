@@ -159,11 +159,11 @@ remote-management:
 ### 3. 更新提示 "GitHub API rate limit exceeded"
 
 - 未认证的 GitHub API 每小时只能请求 60 次
-- 解决方案：
-  1. 在 [GitHub Settings](https://github.com/settings/tokens) 创建一个 Personal Access Token（不需要任何权限）
-  2. 设置环境变量 `GITHUB_TOKEN`：
-     - 临时生效：PowerShell 中运行 `$env:GITHUB_TOKEN = "ghp_xxxxxxxxxxxx"`
-     - 永久生效：在系统环境变量中添加 `GITHUB_TOKEN=ghp_xxxxxxxxxxxx`
+- 脚本会自动降级：从 GitHub 网页解析版本信息，无需额外配置
+- 如需更高频率更新，可设置 `GITHUB_TOKEN` 环境变量提升 API 限制：
+  - 临时生效：PowerShell 中运行 `$env:GITHUB_TOKEN = "ghp_xxxxxxxxxxxx"`
+  - 永久生效：在系统环境变量中添加 `GITHUB_TOKEN=ghp_xxxxxxxxxxxx`
+  - Token 创建地址：[GitHub Settings](https://github.com/settings/tokens)（不需要任何权限）
 
 ### 4. 首次启动一直让输密码
 
