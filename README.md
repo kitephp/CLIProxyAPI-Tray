@@ -156,7 +156,16 @@ remote-management:
 - 确认服务已启动（托盘状态不是 `Not Running`）
 - 确认 `config.yaml` 里的 `port`，再访问 `http://127.0.0.1:<port>/management.html`
 
-### 3. 首次启动一直让输密码
+### 3. 更新提示 "GitHub API rate limit exceeded"
+
+- 未认证的 GitHub API 每小时只能请求 60 次
+- 解决方案：
+  1. 在 [GitHub Settings](https://github.com/settings/tokens) 创建一个 Personal Access Token（不需要任何权限）
+  2. 设置环境变量 `GITHUB_TOKEN`：
+     - 临时生效：PowerShell 中运行 `$env:GITHUB_TOKEN = "ghp_xxxxxxxxxxxx"`
+     - 永久生效：在系统环境变量中添加 `GITHUB_TOKEN=ghp_xxxxxxxxxxxx`
+
+### 4. 首次启动一直让输密码
 
 - 检查 `config.yaml` 是否可写
 - 确认 `remote-management.secret-key` 已成功写入

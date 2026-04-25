@@ -698,6 +698,25 @@ function Stop-AllChannels {
 #endregion
 
 #region GitHub Integration
+function Get-GitHubHeaders {
+    <#
+    .SYNOPSIS
+        Get headers for GitHub API requests
+    .OUTPUTS
+        Hashtable - Headers including optional auth token
+    #>
+    $headers = @{
+        "User-Agent" = $script:Config.AppName
+    }
+
+    $token = $env:GITHUB_TOKEN
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+        $headers["Authorization"] = "Bearer $token"
+    }
+
+    return $headers
+}
+
 function Get-LatestGitHubTag {
     <#
     .SYNOPSIS
@@ -712,7 +731,7 @@ function Get-LatestGitHubTag {
         [string]$Repository
     )
 
-    $headers = @{ "User-Agent" = $script:Config.AppName }
+    $headers = Get-GitHubHeaders
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
@@ -720,6 +739,9 @@ function Get-LatestGitHubTag {
         return $response.tag_name
     }
     catch {
+        if ($_.Exception.Message -match "403") {
+            throw "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable or add github-token in config.yaml"
+        }
         throw "Failed to get latest tag from $Repository : $($_.Exception.Message)"
     }
 }
@@ -739,7 +761,7 @@ function Get-GitHubAssetUrl {
         [string]$AssetName
     )
 
-    $headers = @{ "User-Agent" = $script:Config.AppName }
+    $headers = Get-GitHubHeaders
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
@@ -753,6 +775,9 @@ function Get-GitHubAssetUrl {
         return $asset.browser_download_url
     }
     catch {
+        if ($_.Exception.Message -match "403") {
+            throw "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable or add github-token in config.yaml"
+        }
         throw "Failed to get asset URL for $AssetName : $($_.Exception.Message)"
     }
 }
