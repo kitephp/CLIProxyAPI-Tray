@@ -733,7 +733,7 @@ function Get-GitHubTagFromHtml {
 
     try {
         $url = "https://github.com/$Repository/releases/latest"
-        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop
         $html = $response.Content
 
         if ($html -match 'href="/' + $Repository.Replace('/', '/') + '/releases/tag/([^"]+)"') {
@@ -768,7 +768,7 @@ function Get-GitHubAssetUrlFromHtml {
 
     try {
         $url = "https://github.com/$Repository/releases/latest"
-        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop
         $html = $response.Content
 
         $escapedAsset = [regex]::Escape($AssetName)
@@ -788,6 +788,97 @@ function Get-GitHubAssetUrlFromHtml {
     }
     catch {
         throw "Failed to get asset URL from HTML: $($_.Exception.Message)"
+    }
+}
+
+function Get-LatestGitHubTagAsync {
+    <#
+    .SYNOPSIS
+        Get the latest release tag from a GitHub repository asynchronously
+    .PARAMETER Repository
+        Repository in format "owner/repo"
+    .PARAMETER ScriptBlock
+        ScriptBlock to execute with result
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Repository,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock
+    )
+
+    $headers = Get-GitHubHeaders
+    $url = "https://api.github.com/repos/$Repository/releases/latest"
+
+    try {
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        & $ScriptBlock -InputObject $response.tag_name
+    }
+    catch {
+        if ($_.Exception.Message -match "403") {
+            try {
+                $tag = Get-GitHubTagFromHtml -Repository $Repository
+                & $ScriptBlock -InputObject $tag
+            }
+            catch {
+                & $ScriptBlock -InputObject $null
+            }
+        }
+        else {
+            & $ScriptBlock -InputObject $null
+        }
+    }
+}
+
+function Get-GitHubAssetUrlAsync {
+    <#
+    .SYNOPSIS
+        Find download URL for a specific asset asynchronously
+    .PARAMETER Repository
+        Repository in format "owner/repo"
+    .PARAMETER AssetName
+        Asset file name to find
+    .PARAMETER ScriptBlock
+        ScriptBlock to execute with result
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Repository,
+
+        [Parameter(Mandatory)]
+        [string]$AssetName,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock
+    )
+
+    $headers = Get-GitHubHeaders
+    $url = "https://api.github.com/repos/$Repository/releases/latest"
+
+    try {
+        $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+
+        if (-not $asset) {
+            throw "Asset not found: $AssetName"
+        }
+
+        & $ScriptBlock -InputObject $asset.browser_download_url
+    }
+    catch {
+        if ($_.Exception.Message -match "403") {
+            try {
+                $url = Get-GitHubAssetUrlFromHtml -Repository $Repository -AssetName $AssetName
+                & $ScriptBlock -InputObject $url
+            }
+            catch {
+                & $ScriptBlock -InputObject $null
+            }
+        }
+        else {
+            & $ScriptBlock -InputObject $null
+        }
     }
 }
 
