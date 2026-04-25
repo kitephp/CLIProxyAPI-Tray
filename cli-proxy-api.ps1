@@ -886,7 +886,20 @@ function Test-VersionInstalled {
 
         $script:State.arch = $arch
 
-        $message = @"
+        # Check if this is an update or first install
+        $isUpdate = $script:State.version -ne $null
+
+        if ($isUpdate) {
+            $message = @"
+New version found:
+CLIProxyAPI: $mainTag
+Architecture: $arch
+
+Download and install?
+"@
+        }
+        else {
+            $message = @"
 No version installed.
 
 Latest:
@@ -895,6 +908,7 @@ Architecture: $arch
 
 Download now?
 "@
+        }
 
         $result = [System.Windows.Forms.MessageBox]::Show(
             $message,
@@ -1091,31 +1105,12 @@ function Invoke-Update {
             return
         }
 
-        $message = @"
-New version found:
-CLIProxyAPI: $latestMainTag
-
-Download and install?
-"@
-
-        $result = [System.Windows.Forms.MessageBox]::Show(
-            $message,
-            $script:Config.AppName,
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question
-        )
-
-        if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
-            Show-BalloonTip "Update cancelled" -Icon Info -Duration 1200
-            return
-        }
-
         # Clear version to force new install
         $script:State.version = $null
         $script:State.arch = Get-SystemArchitecture
         Export-State | Out-Null
 
-        # Install new version
+        # Install new version (will show detailed prompt)
         if (Test-VersionInstalled) {
             Start-Channel
         }
