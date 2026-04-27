@@ -733,7 +733,7 @@ function Get-GitHubTagFromHtml {
 
     try {
         $url = "https://github.com/$Repository/releases/latest"
-        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop -UseBasicParsing
         $html = $response.Content
 
         if ($html -match 'href="/' + $Repository.Replace('/', '/') + '/releases/tag/([^"]+)"') {
@@ -767,10 +767,37 @@ function Get-GitHubAssetUrlFromHtml {
     )
 
     try {
+        # Get the latest release page
         $url = "https://github.com/$Repository/releases/latest"
-        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $url -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop -UseBasicParsing
         $html = $response.Content
 
+        # Extract the actual release tag from the URL
+        $releaseTag = $response.BaseResponse.ResponseUri.ToString() -split '/tag/' | Select-Object -Last 1
+        if (-not $releaseTag) {
+            throw "Could not extract release tag from URL"
+        }
+
+        # Try to get the expanded assets page (handles lazy loading)
+        $assetsUrl = "https://github.com/$Repository/releases/expanded_assets/$releaseTag"
+        try {
+            $assetsResponse = Invoke-WebRequest -Uri $assetsUrl -UserAgent $script:Config.AppName -TimeoutSec 5 -ErrorAction Stop -UseBasicParsing
+            $assetsHtml = $assetsResponse.Content
+
+            $escapedAsset = [regex]::Escape($AssetName)
+            if ($assetsHtml -match 'href="([^"]+' + $escapedAsset + ')"[^>]*>.*?(\d+\.\d+\s+\w+)') {
+                $downloadUrl = $Matches[1]
+                if ($downloadUrl -notmatch '^https?://') {
+                    $downloadUrl = "https://github.com" + $downloadUrl
+                }
+                return $downloadUrl
+            }
+        } catch {
+            # If assets page fails, fall back to parsing the main page
+            Write-Verbose "Failed to get expanded assets page: $($_.Exception.Message)"
+        }
+
+        # Fall back to parsing the main page
         $escapedAsset = [regex]::Escape($AssetName)
         if ($html -match 'href="([^"]+' + $escapedAsset + ')"[^>]*>.*?(\d+\.\d+\s+\w+)') {
             $downloadUrl = $Matches[1]
@@ -780,11 +807,9 @@ function Get-GitHubAssetUrlFromHtml {
             return $downloadUrl
         }
 
-        if ($html -match '(https?://github\.com/' + $Repository.Replace('/', '/') + '/releases/download/[^"+\s]+\+' + $escapedAsset + ')') {
-            return $Matches[1]
-        }
-
-        throw "Asset not found: $AssetName"
+        # Try to build the URL directly
+        $directUrl = "https://github.com/$Repository/releases/download/$releaseTag/$AssetName"
+        return $directUrl
     }
     catch {
         throw "Failed to get asset URL from HTML: $($_.Exception.Message)"
@@ -812,7 +837,7 @@ function Get-LatestGitHubTagAsync {
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop -TimeoutSec 10
         & $ScriptBlock -InputObject $response.tag_name
     }
     catch {
@@ -857,7 +882,7 @@ function Get-GitHubAssetUrlAsync {
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
-        $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop -TimeoutSec 10
         $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
 
         if (-not $asset) {
@@ -900,7 +925,7 @@ function Get-LatestGitHubTag {
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop -TimeoutSec 10
         return $response.tag_name
     }
     catch {
@@ -930,7 +955,7 @@ function Get-GitHubAssetUrl {
     $url = "https://api.github.com/repos/$Repository/releases/latest"
 
     try {
-        $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop -TimeoutSec 10
         $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
 
         if (-not $asset) {
@@ -966,6 +991,7 @@ function Invoke-PackageDownload {
         # Simple synchronous download without UI
         $webClient = New-Object System.Net.WebClient
         $webClient.Headers.Add("User-Agent", $script:Config.AppName)
+        $webClient.Timeout = 60000 # 60 seconds timeout
 
         try {
             Show-BalloonTip "Downloading CLIProxyAPI..." -Icon Info -Duration 1200
@@ -1000,6 +1026,7 @@ function Invoke-PackageDownload {
 
     $webClient = New-Object System.Net.WebClient
     $webClient.Headers.Add("User-Agent", $script:Config.AppName)
+    $webClient.Timeout = 60000 # 60 seconds timeout
 
     # Download state
     $script:DownloadError = $null
@@ -1053,21 +1080,173 @@ function Test-VersionInstalled {
     <#
     .SYNOPSIS
         Check if current version is installed, download if not
+    .PARAMETER IsUpdate
+        Indicates if this is an update operation
+    .PARAMETER NoPrompt
+        Indicates if no prompt should be shown (for startup)
     .OUTPUTS
-        Boolean - $true if version is ready to use
+        Object - @{ success = bool; updated = bool; version = string }
     #>
+    param(
+        [bool]$IsUpdate = $false,
+        [bool]$NoPrompt = $false
+    )
 
+    # For update operations, always check GitHub for latest version
+    if ($IsUpdate) {
+        # No existing version found, check if we should prompt for download
+        if ($NoPrompt) {
+            return @{ success = $false; updated = $false; version = $null }
+        }
+
+        # Need to download
+        $arch = Get-SystemArchitecture
+
+        try {
+            $mainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
+            $mainVersion = $mainTag.TrimStart("v")
+
+            $script:State.arch = $arch
+
+            # Show update prompt
+            $message = @"
+New version found:
+CLIProxyAPI: $mainTag
+Architecture: $arch
+
+Download and install?
+"@
+
+            $result = [System.Windows.Forms.MessageBox]::Show(
+                $message,
+                $script:Config.AppName,
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Question
+            )
+
+            if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+                # User declined update, check if any old version exists
+                if (Test-Path $script:Paths.VersionsDir) {
+                    $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
+                                        Where-Object {
+                                            Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")
+                                        } |
+                                        Sort-Object Name -Descending |
+                                        Select-Object -First 1
+
+                    if ($existingVersions) {
+                        # Use the latest existing version
+                        $script:State.version = $existingVersions.Name
+                        Export-State | Out-Null
+                        Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
+                        return @{ success = $true; updated = $false; version = $existingVersions.Name }
+                    }
+                }
+                return @{ success = $false; updated = $false; version = $null }
+            }
+
+            # Create directories
+            New-Item -ItemType Directory -Path $script:Paths.VersionsDir -Force | Out-Null
+            $versionDir = Join-Path $script:Paths.VersionsDir $mainTag
+            New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
+
+            # Build asset names
+            $mainZipName = "CLIProxyAPI_${mainVersion}_windows_${arch}.zip"
+
+            # Create temp directory
+            $tempDir = Join-Path $env:TEMP ("cliproxy_update_" + [Guid]::NewGuid().ToString("N"))
+            New-Item -ItemType Directory -Path $tempDir | Out-Null
+
+            $showProgress = Get-ShowUpdateProgressFromConfig
+
+            try {
+                # Get download URLs
+                $mainUrl = Get-GitHubAssetUrl -Repository $script:Config.MainRepo -AssetName $mainZipName
+
+                $mainZipPath = Join-Path $tempDir $mainZipName
+
+                # Download
+                Invoke-PackageDownload -MainUrl $mainUrl -MainOutputPath $mainZipPath `
+                                       -ShowProgress $showProgress
+
+                # Extract
+                $mainExtractDir = Join-Path $tempDir "main"
+
+                Show-BalloonTip "Extracting files..." -Icon Info -Duration 1200
+                Expand-Archive -LiteralPath $mainZipPath -DestinationPath $mainExtractDir -Force
+
+                # Find executable
+                $mainExeFile = Get-ChildItem -Path $mainExtractDir -Recurse -Filter "*.exe" |
+                               Select-Object -First 1
+
+                if (-not $mainExeFile) {
+                    throw "Executable not found in downloaded package"
+                }
+
+                # Stop running processes
+                Stop-AllChannels
+
+                # Copy to version directory
+                Copy-Item -LiteralPath $mainExeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api.exe") -Force
+
+                # Update state
+                $script:State.version = $mainTag
+                Export-State | Out-Null
+
+                Show-BalloonTip "Installed $mainTag" -Icon Info -Duration 1500
+                return @{ success = $true; updated = $true; version = $mainTag }
+            }
+            catch {
+                Show-BalloonTip "Update failed: $($_.Exception.Message)" -Icon Error -Duration 2500
+                return @{ success = $false; updated = $false; version = $null }
+            }
+            finally {
+                try {
+                    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+                }
+                catch {
+                    # Ignore cleanup errors
+                }
+            }
+        }
+        catch {
+            Show-BalloonTip "Failed to check for updates: $($_.Exception.Message)" -Icon Error -Duration 2500
+            return @{ success = $false; updated = $false; version = $null }
+        }
+    }
+
+    # For non-update operations (startup)
     # Check if current version binaries exist
     if ($script:State.version) {
         $versionDir = Join-Path $script:Paths.VersionsDir $script:State.version
         $mainExe = Join-Path $versionDir "cli-proxy-api.exe"
 
         if (Test-Path $mainExe) {
-            return $true
+            return @{ success = $true; updated = $false; version = $script:State.version }
         }
     }
 
-    # Need to download
+    # Check if there are any existing versions
+    if (Test-Path $script:Paths.VersionsDir) {
+        $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
+                            Where-Object {
+                                Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")
+                            } |
+                            Sort-Object Name -Descending |
+                            Select-Object -First 1
+
+        if ($existingVersions) {
+            # Use the latest existing version
+            $script:State.version = $existingVersions.Name
+            Export-State | Out-Null
+            if (-not $NoPrompt) {
+                Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
+            }
+            return @{ success = $true; updated = $false; version = $existingVersions.Name }
+        }
+    }
+
+    # Need to download (first install)
     $arch = Get-SystemArchitecture
 
     try {
@@ -1076,20 +1255,8 @@ function Test-VersionInstalled {
 
         $script:State.arch = $arch
 
-        # Check if this is an update or first install
-        $isUpdate = $script:State.version -ne $null
-
-        if ($isUpdate) {
-            $message = @"
-New version found:
-CLIProxyAPI: $mainTag
-Architecture: $arch
-
-Download and install?
-"@
-        }
-        else {
-            $message = @"
+        # Show first install prompt
+        $message = @"
 No version installed.
 
 Latest:
@@ -1098,7 +1265,6 @@ Architecture: $arch
 
 Download now?
 "@
-        }
 
         $result = [System.Windows.Forms.MessageBox]::Show(
             $message,
@@ -1108,24 +1274,7 @@ Download now?
         )
 
         if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
-            # User declined download, check if any old version exists
-            if (Test-Path $script:Paths.VersionsDir) {
-                $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
-                                    Where-Object {
-                                        Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")
-                                    } |
-                                    Sort-Object Name -Descending |
-                                    Select-Object -First 1
-
-                if ($existingVersions) {
-                    # Use the latest existing version
-                    $script:State.version = $existingVersions.Name
-                    Export-State | Out-Null
-                    Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
-                    return $true
-                }
-            }
-            return $false
+            return @{ success = $false; updated = $false; version = $null }
         }
 
         # Create directories
@@ -1177,11 +1326,11 @@ Download now?
             Export-State | Out-Null
 
             Show-BalloonTip "Installed $mainTag" -Icon Info -Duration 1500
-            return $true
+            return @{ success = $true; updated = $true; version = $mainTag }
         }
         catch {
             Show-BalloonTip "Update failed: $($_.Exception.Message)" -Icon Error -Duration 2500
-            return $false
+            return @{ success = $false; updated = $false; version = $null }
         }
         finally {
             try {
@@ -1194,7 +1343,7 @@ Download now?
     }
     catch {
         Show-BalloonTip "Failed to check for updates: $($_.Exception.Message)" -Icon Error -Duration 2500
-        return $false
+        return @{ success = $false; updated = $false; version = $null }
     }
 }
 
@@ -1227,7 +1376,8 @@ function Start-Channel {
     }
 
     # Ensure version is installed
-    if (-not (Test-VersionInstalled)) {
+    $versionResult = Test-VersionInstalled -NoPrompt $true
+    if (-not $versionResult.success) {
         return
     }
 
@@ -1286,27 +1436,54 @@ function Invoke-Update {
     .SYNOPSIS
         Check for and install updates
     #>
+    Show-BalloonTip "Checking for updates..." -Icon Info -Duration 1500
+
+    # Get current state values
+    $mainRepo = $script:Config.MainRepo
+    $currentVersion = $script:State.version
+
+    # Create a simple synchronous version for testing
     try {
-        $latestMainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
+        # Get latest tag
+        $latestMainTag = Get-LatestGitHubTag -Repository $mainRepo
 
         # Check if already up to date
-        if ($script:State.version -and ($script:State.version -eq $latestMainTag)) {
+        if ($currentVersion -and ($currentVersion -eq $latestMainTag)) {
             Show-BalloonTip "Already latest: $latestMainTag" -Icon Info -Duration 1500
             return
         }
 
-        # Clear version to force new install
-        $script:State.version = $null
+        # Update architecture
         $script:State.arch = Get-SystemArchitecture
         Export-State | Out-Null
 
-        # Install new version (will show detailed prompt)
-        if (Test-VersionInstalled) {
+        # Force update by temporarily setting version to null
+        $originalVersion = $script:State.version
+        $script:State.version = $null
+        Export-State | Out-Null
+
+        # Install new version
+        $result = Test-VersionInstalled -IsUpdate $true
+        if ($result.success -and $result.updated) {
+            Show-BalloonTip "Updated to $($result.version)" -Icon Info -Duration 1500
             Start-Channel
+        } elseif (-not $result.success) {
+            # Restore original version if update failed
+            $script:State.version = $originalVersion
+            Export-State | Out-Null
+            Show-BalloonTip "Update failed: Installation failed" -Icon Error -Duration 2500
+        } else {
+            # User declined update or using existing version
+            $script:State.version = $result.version
+            Export-State | Out-Null
         }
     }
     catch {
-        Show-BalloonTip "Update check failed: $($_.Exception.Message)" -Icon Error -Duration 2500
+        $errorMsg = $_.Exception.Message
+        Show-BalloonTip "Update check failed: $errorMsg" -Icon Error -Duration 2500
+    }
+    finally {
+        Update-TrayState
     }
 }
 #endregion
@@ -1546,7 +1723,8 @@ if ((Get-ActiveChannel) -ne "") {
 }
 else {
     # Not running, ensure version and start
-    if (Test-VersionInstalled) {
+    $versionResult = Test-VersionInstalled -NoPrompt $true
+    if ($versionResult.success) {
         Start-Channel
     }
     else {
