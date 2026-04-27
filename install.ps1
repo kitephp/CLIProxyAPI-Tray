@@ -84,7 +84,7 @@ function Get-DefaultInstallDir {
         throw "Cannot resolve user home directory."
     }
 
-    return (Join-Path $homeDir "cli-proxy-api-tray")
+    return (Join-Path $homeDir ".cli-proxy-api-tray")
 }
 
 function Get-RemoteSourceRoot {

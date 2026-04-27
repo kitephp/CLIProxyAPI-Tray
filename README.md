@@ -41,7 +41,7 @@ irm https://raw.githubusercontent.com/kitephp/CLIProxyAPI-Tray/main/install.ps1 
 安装目录为：
 
 ```text
-%USERPROFILE%\cli-proxy-api-tray
+%USERPROFILE%\.cli-proxy-api-tray
 ```
 
 安装器不会覆盖已有的 `config.yaml`、`settings.json`、`versions/`、`logs/`。
@@ -163,7 +163,7 @@ CLIProxyAPI_Tray/
    - `versions/`
    - `logs/`
 
-一行命令安装的默认目录是 `%USERPROFILE%\cli-proxy-api-tray`，卸载时可以一并删除该目录。
+一行命令安装的默认目录是 `%USERPROFILE%\.cli-proxy-api-tray`，卸载时可以一并删除该目录。
 
 ## 许可证
 
