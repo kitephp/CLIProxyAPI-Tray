@@ -4,17 +4,17 @@
 .SYNOPSIS
     CLIProxyAPI Tray - Windows System Tray Application
 .DESCRIPTION
-    A system tray application for managing CLIProxyAPI (Main/Plus channels).
+    A system tray application for managing CLIProxyAPI.
     Features:
     - Single instance enforcement via mutex
-    - Channel switching (Main/Plus), mutually exclusive
+    - Start/stop/restart CLIProxyAPI
     - Automatic version download/update from GitHub
     - Shared config.yaml management
     - Password prompt for remote management
     - System tray menu interface
 .NOTES
-    Version: 1.0
-    Author: CLIProxyAPI Team
+    Version: 2.0.0
+    Author: KitePHP
     Requirements: Windows 10+, PowerShell 5.1+
 #>
 
@@ -22,15 +22,15 @@
 $script:Config = @{
     # Application
     AppName = "CLIProxyAPI Tray"
+    TrayVersion = "2.0.0"
     MutexName = "Global\CLIProxyAPI_Tray_SingleInstance"
 
     # GitHub Repositories
-    MainRepo = "router-for-me/CLIProxyAPI"
-    PlusRepo = "router-for-me/CLIProxyAPIPlus"
+    Repository = "router-for-me/CLIProxyAPI"
+    ProjectUrl = "https://github.com/kitephp/CLIProxyAPI-Tray"
 
     # Process Names (without .exe)
-    MainProcess = "cli-proxy-api"
-    PlusProcess = "cli-proxy-api-plus"
+    ProcessName = "cli-proxy-api"
 
     # Default Values
     DefaultPort = 8317
@@ -73,10 +73,32 @@ public static class Win32API {
 Add-Type -AssemblyName System.Threading
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName Microsoft.VisualBasic
 #endregion
 
 #region Initialization
+function Get-PowerShellHostPath {
+    <#
+    .SYNOPSIS
+        Resolve the current PowerShell host executable path.
+    #>
+    try {
+        $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+        if ($currentProcess.Path -and (Test-Path -LiteralPath $currentProcess.Path)) {
+            return $currentProcess.Path
+        }
+    }
+    catch {
+        Write-Verbose "Failed to resolve current PowerShell host path"
+    }
+
+    $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (Test-Path -LiteralPath $windowsPowerShell) {
+        return $windowsPowerShell
+    }
+
+    return "powershell.exe"
+}
+
 function Initialize-Application {
     <#
     .SYNOPSIS
@@ -110,7 +132,7 @@ function Initialize-Application {
 
     # Ensure STA mode for WinForms
     if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        Start-Process -FilePath (Get-PowerShellHostPath) -ArgumentList @(
             "-STA", "-NoProfile", "-WindowStyle", "Hidden",
             "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`""
         )
@@ -137,20 +159,20 @@ $script:Paths = @{
     DataDir       = Join-Path $script:LocalDataRoot "CLIProxyAPI_Tray"
     Config        = Join-Path $PSScriptRoot "config.yaml"
     ConfigExample = Join-Path $PSScriptRoot "config.example.yaml"
+    Icon          = Join-Path $PSScriptRoot "cli-proxy-api.ico"
     VersionsDir   = Join-Path $PSScriptRoot "versions"
-    StateFile     = Join-Path $PSScriptRoot "state.json"
-    StateFileFallback = Join-Path (Join-Path $script:LocalDataRoot "CLIProxyAPI_Tray") "state.json"
+    SettingsFile  = Join-Path $PSScriptRoot "settings.json"
+    SettingsFileFallback = Join-Path (Join-Path $script:LocalDataRoot "CLIProxyAPI_Tray") "settings.json"
     LogDir        = Join-Path $PSScriptRoot "logs"
 }
 #endregion
 
 #region State Management
 $script:State = @{
-    lastChannel = "main"   # main | plus
-    version     = $null    # main tag e.g. v6.7.37
-    plusTag     = $null    # plus tag e.g. v6.7.37-0
+    version     = $null    # tag e.g. v6.7.37
     arch        = $null    # amd64 | arm64
     autoOpenWebUI = $true  # start/restart auto-open behavior
+    autoUpdate  = $false   # check and install updates on tray startup
 }
 
 function Get-SystemArchitecture {
@@ -189,82 +211,113 @@ function Test-DirectoryWritable {
     }
 }
 
+function Get-SettingsCandidate {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [bool]$IsFallback = $false
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $object = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop |
+                  ConvertFrom-Json -ErrorAction Stop
+
+        return [PSCustomObject]@{
+            Path         = $item.FullName
+            Object       = $object
+            LastWriteUtc = $item.LastWriteTimeUtc
+            IsFallback   = $IsFallback
+        }
+    }
+    catch {
+        Write-Warning "Failed to read settings candidate '$Path': $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-SettingsWritePath {
+    param(
+        [object]$Candidate = $null
+    )
+
+    if ($Candidate -and [bool]$Candidate.IsFallback) {
+        return $script:Paths.SettingsFileFallback
+    }
+
+    $primaryDir = Split-Path -Parent $script:Paths.SettingsFile
+    if ($primaryDir -and (-not (Test-DirectoryWritable -Path $primaryDir))) {
+        return $script:Paths.SettingsFileFallback
+    }
+
+    return $script:Paths.SettingsFile
+}
+
 function Import-State {
     <#
     .SYNOPSIS
-        Load state from JSON file
+        Load settings from JSON file
     #>
-    $primaryPath = $script:Paths.StateFile
-    $fallbackPath = $script:Paths.StateFileFallback
+    $candidates = @(
+        Get-SettingsCandidate -Path $script:Paths.SettingsFile
+        Get-SettingsCandidate -Path $script:Paths.SettingsFileFallback -IsFallback $true
+    ) | Where-Object { $null -ne $_ }
 
-    $primaryExists = $primaryPath -and (Test-Path -LiteralPath $primaryPath)
-    $fallbackExists = $fallbackPath -and (Test-Path -LiteralPath $fallbackPath)
-
-    $statePath = $null
-    if ($primaryExists -and $fallbackExists) {
-        $primaryDir = Split-Path -Parent $primaryPath
-
-        if ($primaryDir -and (-not (Test-DirectoryWritable -Path $primaryDir))) {
-            $statePath = $fallbackPath
-        }
-        else {
-            # 两份文件都存在时优先使用最近更新的那份。
-            $primaryTime = (Get-Item -LiteralPath $primaryPath).LastWriteTimeUtc
-            $fallbackTime = (Get-Item -LiteralPath $fallbackPath).LastWriteTimeUtc
-            $statePath = if ($fallbackTime -gt $primaryTime) { $fallbackPath } else { $primaryPath }
-        }
-    }
-    elseif ($primaryExists) {
-        $statePath = $primaryPath
-    }
-    elseif ($fallbackExists) {
-        $statePath = $fallbackPath
-    }
-    else {
+    if (-not $candidates -or $candidates.Count -eq 0) {
         return
     }
 
-    # 后续保存沿用加载到的路径，避免反复写失败或写回旧文件。
-    $script:Paths.StateFile = $statePath
+    $candidate = $candidates |
+                 Sort-Object -Property LastWriteUtc -Descending |
+                 Select-Object -First 1
 
     try {
-        $obj = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop |
-               ConvertFrom-Json
+        $obj = $candidate.Object
 
-        if ($obj.lastChannel -in @("main", "plus")) {
-            $script:State.lastChannel = [string]$obj.lastChannel
-        }
         if ($obj.version) { $script:State.version = [string]$obj.version }
-        if ($obj.plusTag) { $script:State.plusTag = [string]$obj.plusTag }
         if ($obj.arch)    { $script:State.arch = [string]$obj.arch }
         if ($null -ne $obj.autoOpenWebUI) {
             $script:State.autoOpenWebUI = [bool]$obj.autoOpenWebUI
         }
+        if ($null -ne $obj.autoUpdate) {
+            $script:State.autoUpdate = [bool]$obj.autoUpdate
+        }
+
+        $script:Paths.SettingsFile = Get-SettingsWritePath -Candidate $candidate
     }
     catch {
-        Write-Warning "Failed to load state: $($_.Exception.Message)"
+        Write-Warning "Failed to load settings: $($_.Exception.Message)"
     }
 }
 
 function Export-State {
     <#
     .SYNOPSIS
-        Save current state to JSON file
+        Save current settings to JSON file
     #>
     try {
         $stateObject = [PSCustomObject]@{
-            lastChannel = $script:State.lastChannel
             version     = $script:State.version
-            plusTag     = $script:State.plusTag
             arch        = $script:State.arch
             autoOpenWebUI = [bool]$script:State.autoOpenWebUI
+            autoUpdate  = [bool]$script:State.autoUpdate
             updatedAt   = (Get-Date).ToString("o")
         }
 
         $json = $stateObject | ConvertTo-Json -Compress
 
         try {
-            $json | Set-Content -LiteralPath $script:Paths.StateFile -Encoding UTF8 -ErrorAction Stop
+            $settingsDir = Split-Path -Parent $script:Paths.SettingsFile
+            if ($settingsDir) {
+                New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+            }
+
+            $json | Set-Content -LiteralPath $script:Paths.SettingsFile -Encoding UTF8 -ErrorAction Stop
             return $true
         }
         catch {
@@ -272,7 +325,7 @@ function Export-State {
             $primaryErr = $_.Exception.Message
 
             try {
-                $fallbackPath = $script:Paths.StateFileFallback
+                $fallbackPath = $script:Paths.SettingsFileFallback
                 $fallbackDir = Split-Path -Parent $fallbackPath
                 if ($fallbackDir) {
                     New-Item -ItemType Directory -Path $fallbackDir -Force | Out-Null
@@ -281,34 +334,51 @@ function Export-State {
                 $json | Set-Content -LiteralPath $fallbackPath -Encoding UTF8 -ErrorAction Stop
 
                 # 后续统一用可写路径，避免每次保存都失败。
-                $script:Paths.StateFile = $fallbackPath
+                $script:Paths.SettingsFile = $fallbackPath
 
                 if (-not $script:StateFileWriteFallbackNotified) {
                     $script:StateFileWriteFallbackNotified = $true
-                    Show-BalloonTip "state.json 保存失败（$primaryErr），已改为写入：$fallbackPath" -Icon Warning -Duration 2500
+                    Show-BalloonTip "settings.json 保存失败（$primaryErr），已改为写入：$fallbackPath" -Icon Warning -Duration 2500
                 }
                 return $true
             }
             catch {
                 if (-not $script:StateFileWriteFailedNotified) {
                     $script:StateFileWriteFailedNotified = $true
-                    Show-BalloonTip "state.json 保存失败：$primaryErr" -Icon Error -Duration 2500
+                    Show-BalloonTip "settings.json 保存失败：$primaryErr" -Icon Error -Duration 2500
                 }
-                Write-Warning "Failed to save state: $primaryErr"
+                Write-Warning "Failed to save settings: $primaryErr"
                 return $false
             }
         }
     }
     catch {
-        Write-Warning "Failed to save state: $($_.Exception.Message)"
+        Write-Warning "Failed to save settings: $($_.Exception.Message)"
         return $false
     }
 }
 #endregion
 
 #region Tray Icon Initialization
+function Get-ApplicationIcon {
+    <#
+    .SYNOPSIS
+        Load the application icon from the project directory.
+    #>
+    try {
+        if ($script:Paths.Icon -and (Test-Path -LiteralPath $script:Paths.Icon)) {
+            return (New-Object System.Drawing.Icon($script:Paths.Icon))
+        }
+    }
+    catch {
+        Write-Warning "Failed to load tray icon: $($_.Exception.Message)"
+    }
+
+    return ([System.Drawing.Icon][System.Drawing.SystemIcons]::Application.Clone())
+}
+
 $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
-$script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
+$script:TrayIcon.Icon = Get-ApplicationIcon
 $script:TrayIcon.Visible = $true
 $script:TrayIcon.Text = $script:Config.AppName
 #endregion
@@ -566,18 +636,85 @@ function Request-Password {
         [string]$Prompt = "Please enter password:"
     )
 
-    $password = ""
-    while ([string]::IsNullOrWhiteSpace($password)) {
-        $password = [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, "")
+    while ($true) {
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = $Title
+        $form.ClientSize = New-Object System.Drawing.Size(460, 180)
+        $form.StartPosition = "CenterScreen"
+        $form.FormBorderStyle = "FixedDialog"
+        $form.MaximizeBox = $false
+        $form.MinimizeBox = $false
+        $form.ShowInTaskbar = $true
+        $form.TopMost = $true
+        $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
-        if ($password -eq "") {
-            return ""  # User cancelled
+        $layout = New-Object System.Windows.Forms.TableLayoutPanel
+        $layout.Dock = "Fill"
+        $layout.Padding = New-Object System.Windows.Forms.Padding(16)
+        $layout.ColumnCount = 1
+        $layout.RowCount = 3
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 62))) | Out-Null
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 32))) | Out-Null
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+        $form.Controls.Add($layout)
+
+        $label = New-Object System.Windows.Forms.Label
+        $label.Text = $Prompt
+        $label.Dock = "Fill"
+        $label.TextAlign = "MiddleLeft"
+        $layout.Controls.Add($label, 0, 0)
+
+        $textBox = New-Object System.Windows.Forms.TextBox
+        $textBox.Dock = "Fill"
+        $textBox.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+        $textBox.UseSystemPasswordChar = $true
+        $layout.Controls.Add($textBox, 0, 1)
+
+        $buttonPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+        $buttonPanel.Dock = "Fill"
+        $buttonPanel.FlowDirection = "RightToLeft"
+        $buttonPanel.WrapContents = $false
+        $buttonPanel.Margin = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+        $layout.Controls.Add($buttonPanel, 0, 2)
+
+        $okButton = New-Object System.Windows.Forms.Button
+        $okButton.Text = "OK"
+        $okButton.Size = New-Object System.Drawing.Size(75, 28)
+        $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $buttonPanel.Controls.Add($okButton)
+
+        $cancelButton = New-Object System.Windows.Forms.Button
+        $cancelButton.Text = "Cancel"
+        $cancelButton.Size = New-Object System.Drawing.Size(75, 28)
+        $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $buttonPanel.Controls.Add($cancelButton)
+
+        $form.AcceptButton = $okButton
+        $form.CancelButton = $cancelButton
+        $form.Add_Shown({ $textBox.Focus() })
+
+        try {
+            $result = $form.ShowDialog()
+            if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+                return ""
+            }
+
+            $password = $textBox.Text.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($password)) {
+                return $password
+            }
+
+            [System.Windows.Forms.MessageBox]::Show(
+                "Password cannot be empty.",
+                $Title,
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
         }
-
-        $password = $password.Trim()
+        finally {
+            $form.Dispose()
+        }
     }
-
-    return $password
 }
 
 function Test-PasswordConfigured {
@@ -676,43 +813,27 @@ function Wait-PortListening {
 #endregion
 
 #region Process Management
-function Get-ActiveChannel {
+function Test-CLIProxyAPIRunning {
     <#
     .SYNOPSIS
-        Detect which channel is currently running
+        Check whether CLIProxyAPI is currently running
     .OUTPUTS
-        String - "main", "plus", or "" if neither
+        Boolean - $true if CLIProxyAPI is running
     #>
-    if (Get-Process -Name $script:Config.PlusProcess -ErrorAction SilentlyContinue) {
-        return "plus"
-    }
-
-    if (Get-Process -Name $script:Config.MainProcess -ErrorAction SilentlyContinue) {
-        return "main"
-    }
-
-    return ""
+    return [bool](Get-Process -Name $script:Config.ProcessName -ErrorAction SilentlyContinue)
 }
 
-function Stop-AllChannels {
+function Stop-CLIProxyAPI {
     <#
     .SYNOPSIS
-        Stop all running channel processes
+        Stop the running CLIProxyAPI process
     #>
     try {
-        Get-Process -Name $script:Config.MainProcess -ErrorAction SilentlyContinue |
+        Get-Process -Name $script:Config.ProcessName -ErrorAction SilentlyContinue |
             Stop-Process -Force
     }
     catch {
-        Write-Verbose "No main process to stop"
-    }
-
-    try {
-        Get-Process -Name $script:Config.PlusProcess -ErrorAction SilentlyContinue |
-            Stop-Process -Force
-    }
-    catch {
-        Write-Verbose "No plus process to stop"
+        Write-Verbose "No CLIProxyAPI process to stop"
     }
 
     Start-Sleep -Milliseconds 200
@@ -782,20 +903,14 @@ function Get-GitHubAssetUrl {
 function Invoke-PackageDownload {
     <#
     .SYNOPSIS
-        Download both Main and Plus packages with optional progress UI
+        Download CLIProxyAPI package with optional progress UI
     #>
     param(
         [Parameter(Mandatory)]
-        [string]$MainUrl,
+        [string]$PackageUrl,
 
         [Parameter(Mandatory)]
-        [string]$MainOutputPath,
-
-        [Parameter(Mandatory)]
-        [string]$PlusUrl,
-
-        [Parameter(Mandatory)]
-        [string]$PlusOutputPath,
+        [string]$OutputPath,
 
         [bool]$ShowProgress = $true
     )
@@ -806,11 +921,8 @@ function Invoke-PackageDownload {
         $webClient.Headers.Add("User-Agent", $script:Config.AppName)
 
         try {
-            Show-BalloonTip "Downloading Main..." -Icon Info -Duration 1200
-            $webClient.DownloadFile($MainUrl, $MainOutputPath)
-
-            Show-BalloonTip "Downloading Plus..." -Icon Info -Duration 1200
-            $webClient.DownloadFile($PlusUrl, $PlusOutputPath)
+            Show-BalloonTip "Downloading CLIProxyAPI..." -Icon Info -Duration 1200
+            $webClient.DownloadFile($PackageUrl, $OutputPath)
         }
         finally {
             $webClient.Dispose()
@@ -822,35 +934,64 @@ function Invoke-PackageDownload {
     # Create progress form
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Downloading Updates"
-    $form.Size = New-Object System.Drawing.Size(400, 150)
+    $form.ClientSize = New-Object System.Drawing.Size(420, 150)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.TopMost = $true
     $form.ShowInTaskbar = $true
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $layout = New-Object System.Windows.Forms.TableLayoutPanel
+    $layout.Dock = "Fill"
+    $layout.Padding = New-Object System.Windows.Forms.Padding(18)
+    $layout.ColumnCount = 1
+    $layout.RowCount = 3
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 36))) | Out-Null
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 28))) | Out-Null
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+    $form.Controls.Add($layout)
 
     $label = New-Object System.Windows.Forms.Label
-    $label.Text = "Initializing..."
-    $label.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $label.AutoSize = $false
-    $label.Location = New-Object System.Drawing.Point(20, 40)
-    $label.Size = New-Object System.Drawing.Size(340, 30)
-    $label.TextAlign = "MiddleCenter"
-    $form.Controls.Add($label)
+    $label.Text = "Preparing download..."
+    $label.Dock = "Fill"
+    $label.TextAlign = "MiddleLeft"
+    $layout.Controls.Add($label, 0, 0)
+
+    $progressBar = New-Object System.Windows.Forms.ProgressBar
+    $progressBar.Dock = "Fill"
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = 100
+    $progressBar.Style = "Continuous"
+    $layout.Controls.Add($progressBar, 0, 1)
+
+    $detailLabel = New-Object System.Windows.Forms.Label
+    $detailLabel.Text = ""
+    $detailLabel.Dock = "Fill"
+    $detailLabel.TextAlign = "TopLeft"
+    $layout.Controls.Add($detailLabel, 0, 2)
 
     $webClient = New-Object System.Net.WebClient
     $webClient.Headers.Add("User-Agent", $script:Config.AppName)
 
     # Download state
-    $script:CurrentDownload = "main"
     $script:DownloadError = $null
 
     # Progress event
     $webClient.add_DownloadProgressChanged({
         param($sender, $e)
-        $channelName = if ($script:CurrentDownload -eq "main") { "Main" } else { "Plus" }
-        $label.Text = "Downloading ${channelName}: $($e.ProgressPercentage)%  ($([math]::Round($e.BytesReceived / 1MB, 1)) MB / $([math]::Round($e.TotalBytesToReceive / 1MB, 1)) MB)"
+        $progressBar.Value = [Math]::Max(0, [Math]::Min(100, $e.ProgressPercentage))
+        $label.Text = "Downloading CLIProxyAPI..."
+
+        $receivedMb = [math]::Round($e.BytesReceived / 1MB, 1)
+        if ($e.TotalBytesToReceive -gt 0) {
+            $totalMb = [math]::Round($e.TotalBytesToReceive / 1MB, 1)
+            $detailLabel.Text = "$($e.ProgressPercentage)%  $receivedMb MB / $totalMb MB"
+        }
+        else {
+            $detailLabel.Text = "$receivedMb MB downloaded"
+        }
     })
 
     # Completion event
@@ -863,29 +1004,13 @@ function Invoke-PackageDownload {
             return
         }
 
-        if ($script:CurrentDownload -eq "main") {
-            # Start Plus download
-            $script:CurrentDownload = "plus"
-            $label.Text = "Starting Plus download..."
-
-            try {
-                $webClient.DownloadFileAsync($PlusUrl, $PlusOutputPath)
-            }
-            catch {
-                $script:DownloadError = $_.Exception
-                $form.Close()
-            }
-        }
-        else {
-            # Both downloads complete
-            $form.Close()
-        }
+        $form.Close()
     })
 
-    # Start Main download when form is shown
+    # Start download when form is shown
     $form.add_Shown({
         try {
-            $webClient.DownloadFileAsync($MainUrl, $MainOutputPath)
+            $webClient.DownloadFileAsync($PackageUrl, $OutputPath)
         }
         catch {
             $script:DownloadError = $_.Exception
@@ -914,14 +1039,15 @@ function Test-VersionInstalled {
     .OUTPUTS
         Boolean - $true if version is ready to use
     #>
+    param(
+        [switch]$AssumeDownloadConsent
+    )
 
     # Check if current version binaries exist
     if ($script:State.version) {
-        $versionDir = Join-Path $script:Paths.VersionsDir $script:State.version
-        $mainExe = Join-Path $versionDir "cli-proxy-api.exe"
-        $plusExe = Join-Path $versionDir "cli-proxy-api-plus.exe"
+        $exePath = Get-CLIProxyAPIExecutablePath
 
-        if ((Test-Path $mainExe) -and (Test-Path $plusExe)) {
+        if ($exePath -and (Test-Path -LiteralPath $exePath)) {
             return $true
         }
     }
@@ -930,62 +1056,58 @@ function Test-VersionInstalled {
     $arch = Get-SystemArchitecture
 
     try {
-        $mainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
-        $plusTag = Get-LatestGitHubTag -Repository $script:Config.PlusRepo
-        $mainVersion = $mainTag.TrimStart("v")
+        $latestTag = Get-LatestGitHubTag -Repository $script:Config.Repository
+        $version = $latestTag.TrimStart("v")
 
         $script:State.arch = $arch
 
-        $message = @"
+        if (-not $AssumeDownloadConsent) {
+            $message = @"
 No version installed.
 
 Latest:
-Main: $mainTag
-Plus: $plusTag
+CLIProxyAPI: $latestTag
 Architecture: $arch
 
 Download now?
 "@
 
-        $result = [System.Windows.Forms.MessageBox]::Show(
-            $message,
-            $script:Config.AppName,
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question
-        )
+            $result = [System.Windows.Forms.MessageBox]::Show(
+                $message,
+                $script:Config.AppName,
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Question
+            )
 
-        if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
-            # User declined download, check if any old version exists
-            if (Test-Path $script:Paths.VersionsDir) {
-                $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
-                                    Where-Object {
-                                        (Test-Path (Join-Path $_.FullName "cli-proxy-api.exe")) -and
-                                        (Test-Path (Join-Path $_.FullName "cli-proxy-api-plus.exe"))
-                                    } |
-                                    Sort-Object Name -Descending |
-                                    Select-Object -First 1
+            if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+                # User declined download, check if any old version exists
+                if (Test-Path $script:Paths.VersionsDir) {
+                    $existingVersions = Get-ChildItem -Path $script:Paths.VersionsDir -Directory |
+                                        Where-Object {
+                                            Test-Path -LiteralPath (Join-Path $_.FullName "cli-proxy-api.exe")
+                                        } |
+                                        Sort-Object Name -Descending |
+                                        Select-Object -First 1
 
-                if ($existingVersions) {
-                    # Use the latest existing version
-                    $script:State.version = $existingVersions.Name
-                    $script:State.plusTag = $existingVersions.Name
-                    Export-State | Out-Null
-                    Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
-                    return $true
+                    if ($existingVersions) {
+                        # Use the latest existing version
+                        $script:State.version = $existingVersions.Name
+                        Export-State | Out-Null
+                        Show-BalloonTip "Using existing version: $($existingVersions.Name)" -Icon Info -Duration 1500
+                        return $true
+                    }
                 }
+                return $false
             }
-            return $false
         }
 
         # Create directories
         New-Item -ItemType Directory -Path $script:Paths.VersionsDir -Force | Out-Null
-        $versionDir = Join-Path $script:Paths.VersionsDir $mainTag
+        $versionDir = Join-Path $script:Paths.VersionsDir $latestTag
         New-Item -ItemType Directory -Path $versionDir -Force | Out-Null
 
         # Build asset names
-        $plusVersion = $plusTag.TrimStart("v")
-        $mainZipName = "CLIProxyAPI_${mainVersion}_windows_${arch}.zip"
-        $plusZipName = "CLIProxyAPIPlus_${plusVersion}_windows_${arch}.zip"
+        $zipName = "CLIProxyAPI_${version}_windows_${arch}.zip"
 
         # Create temp directory
         $tempDir = Join-Path $env:TEMP ("cliproxy_update_" + [Guid]::NewGuid().ToString("N"))
@@ -995,51 +1117,44 @@ Download now?
 
         try {
             # Get download URLs
-            $mainUrl = Get-GitHubAssetUrl -Repository $script:Config.MainRepo -AssetName $mainZipName
-            $plusUrl = Get-GitHubAssetUrl -Repository $script:Config.PlusRepo -AssetName $plusZipName
+            $downloadUrl = Get-GitHubAssetUrl -Repository $script:Config.Repository -AssetName $zipName
 
-            $mainZipPath = Join-Path $tempDir $mainZipName
-            $plusZipPath = Join-Path $tempDir $plusZipName
+            $zipPath = Join-Path $tempDir $zipName
 
             # Download
-            Invoke-PackageDownload -MainUrl $mainUrl -MainOutputPath $mainZipPath `
-                                   -PlusUrl $plusUrl -PlusOutputPath $plusZipPath `
+            Invoke-PackageDownload -PackageUrl $downloadUrl -OutputPath $zipPath `
                                    -ShowProgress $showProgress
 
             # Extract
-            $mainExtractDir = Join-Path $tempDir "main"
-            $plusExtractDir = Join-Path $tempDir "plus"
+            $extractDir = Join-Path $tempDir "package"
 
             Show-BalloonTip "Extracting files..." -Icon Info -Duration 1200
-            Expand-Archive -LiteralPath $mainZipPath -DestinationPath $mainExtractDir -Force
-            Expand-Archive -LiteralPath $plusZipPath -DestinationPath $plusExtractDir -Force
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
 
             # Find executables
-            $mainExeFile = Get-ChildItem -Path $mainExtractDir -Recurse -Filter "*.exe" |
-                           Select-Object -First 1
-            $plusExeFile = Get-ChildItem -Path $plusExtractDir -Recurse -Filter "*.exe" |
-                           Select-Object -First 1
+            $exeFile = Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter "cli-proxy-api.exe" |
+                       Select-Object -First 1
 
-            if (-not $mainExeFile) {
-                throw "Main executable not found in downloaded package"
+            if (-not $exeFile) {
+                $exeFile = Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter "*.exe" |
+                       Select-Object -First 1
             }
-            if (-not $plusExeFile) {
-                throw "Plus executable not found in downloaded package"
+
+            if (-not $exeFile) {
+                throw "CLIProxyAPI executable not found in downloaded package"
             }
 
             # Stop running processes
-            Stop-AllChannels
+            Stop-CLIProxyAPI
 
             # Copy to version directory
-            Copy-Item -LiteralPath $mainExeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api.exe") -Force
-            Copy-Item -LiteralPath $plusExeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api-plus.exe") -Force
+            Copy-Item -LiteralPath $exeFile.FullName -Destination (Join-Path $versionDir "cli-proxy-api.exe") -Force
 
             # Update state
-            $script:State.version = $mainTag
-            $script:State.plusTag = $plusTag
+            $script:State.version = $latestTag
             Export-State | Out-Null
 
-            Show-BalloonTip "Installed $mainTag" -Icon Info -Duration 1500
+            Show-BalloonTip "Installed $latestTag" -Icon Info -Duration 1500
             return $true
         }
         catch {
@@ -1061,54 +1176,33 @@ Download now?
     }
 }
 
-function Get-ChannelExecutablePath {
+function Get-CLIProxyAPIExecutablePath {
     <#
     .SYNOPSIS
-        Get executable path for specified channel
+        Get executable path for the current CLIProxyAPI version
     .OUTPUTS
         String - Full path to executable, or $null if not found
     #>
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet("main", "plus")]
-        [string]$Channel
-    )
-
     if (-not $script:State.version) {
         return $null
     }
 
     $versionDir = Join-Path $script:Paths.VersionsDir $script:State.version
-
-    if ($Channel -eq "plus") {
-        return (Join-Path $versionDir "cli-proxy-api-plus.exe")
-    }
-
     return (Join-Path $versionDir "cli-proxy-api.exe")
 }
 #endregion
 
-#region Channel Operations
-function Start-Channel {
+#region Service Operations
+function Start-CLIProxyAPI {
     <#
     .SYNOPSIS
-        Start a specific channel (main or plus)
+        Start CLIProxyAPI
     #>
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet("main", "plus")]
-        [string]$Channel
-    )
-
     # Ensure password is configured
     if (-not (Test-PasswordConfigured)) {
         Show-BalloonTip "Password not set. Start cancelled." -Icon Warning -Duration 2000
         return
     }
-
-    # Save last channel preference
-    $script:State.lastChannel = $Channel
-    Export-State | Out-Null
 
     # Ensure version is installed
     if (-not (Test-VersionInstalled)) {
@@ -1116,15 +1210,15 @@ function Start-Channel {
     }
 
     # Get executable path
-    $exePath = Get-ChannelExecutablePath -Channel $Channel
+    $exePath = Get-CLIProxyAPIExecutablePath
 
-    if (-not $exePath -or -not (Test-Path $exePath)) {
+    if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) {
         Show-BalloonTip "Executable not found for current version" -Icon Error -Duration 2500
         return
     }
 
-    # Stop any running channels
-    Stop-AllChannels
+    # Stop any running instance before starting a fresh one
+    Stop-CLIProxyAPI
 
     # Build arguments
     $arguments = "--config `"$($script:Paths.Config)`""
@@ -1141,7 +1235,7 @@ function Start-Channel {
         Update-TrayState
 
         if ($portReady) {
-            Show-BalloonTip "Started: $Channel" -Icon Info -Duration 1200
+            Show-BalloonTip "Started CLIProxyAPI" -Icon Info -Duration 1200
 
             if ([bool]$script:State.autoOpenWebUI) {
                 Start-Sleep -Seconds 1
@@ -1157,15 +1251,54 @@ function Start-Channel {
     }
 }
 
-function Restart-Channel {
+function Restart-CLIProxyAPI {
     <#
     .SYNOPSIS
-        Restart currently active or last used channel
+        Restart CLIProxyAPI
     #>
-    $activeChannel = Get-ActiveChannel
-    $channelToStart = if ($activeChannel -ne "") { $activeChannel } else { $script:State.lastChannel }
+    Start-CLIProxyAPI
+}
 
-    Start-Channel -Channel $channelToStart
+function Invoke-AutoUpdate {
+    <#
+    .SYNOPSIS
+        Check for startup updates and install without confirmation when Auto Update is enabled.
+    .OUTPUTS
+        Boolean - $true if an update was installed
+    #>
+    try {
+        $latestTag = Get-LatestGitHubTag -Repository $script:Config.Repository
+
+        $currentExePath = Get-CLIProxyAPIExecutablePath
+        if ($script:State.version -and
+            ($script:State.version -eq $latestTag) -and
+            $currentExePath -and
+            (Test-Path -LiteralPath $currentExePath)) {
+            return $false
+        }
+
+        $previousVersion = $script:State.version
+        $previousArch = $script:State.arch
+
+        Show-BalloonTip "Auto update found: $latestTag" -Icon Info -Duration 1500
+
+        $script:State.version = $null
+        $script:State.arch = Get-SystemArchitecture
+        Export-State | Out-Null
+
+        if (Test-VersionInstalled -AssumeDownloadConsent) {
+            return $true
+        }
+
+        $script:State.version = $previousVersion
+        $script:State.arch = $previousArch
+        Export-State | Out-Null
+        return $false
+    }
+    catch {
+        Show-BalloonTip "Auto update check failed: $($_.Exception.Message)" -Icon Error -Duration 2500
+        return $false
+    }
 }
 
 function Invoke-Update {
@@ -1174,19 +1307,24 @@ function Invoke-Update {
         Check for and install updates
     #>
     try {
-        $latestMainTag = Get-LatestGitHubTag -Repository $script:Config.MainRepo
-        $latestPlusTag = Get-LatestGitHubTag -Repository $script:Config.PlusRepo
+        $latestTag = Get-LatestGitHubTag -Repository $script:Config.Repository
 
         # Check if already up to date
-        if ($script:State.version -and ($script:State.version -eq $latestMainTag)) {
-            Show-BalloonTip "Already latest: $latestMainTag" -Icon Info -Duration 1500
+        $currentExePath = Get-CLIProxyAPIExecutablePath
+        if ($script:State.version -and
+            ($script:State.version -eq $latestTag) -and
+            $currentExePath -and
+            (Test-Path -LiteralPath $currentExePath)) {
+            Show-BalloonTip "Already latest: $latestTag" -Icon Info -Duration 1500
             return
         }
 
+        $previousVersion = $script:State.version
+        $previousArch = $script:State.arch
+
         $message = @"
 New version found:
-Main: $latestMainTag
-Plus: $latestPlusTag
+CLIProxyAPI: $latestTag
 
 Download and install?
 "@
@@ -1205,13 +1343,17 @@ Download and install?
 
         # Clear version to force new install
         $script:State.version = $null
-        $script:State.plusTag = $null
         $script:State.arch = Get-SystemArchitecture
         Export-State | Out-Null
 
         # Install new version
-        if (Test-VersionInstalled) {
-            Start-Channel -Channel $script:State.lastChannel
+        if (Test-VersionInstalled -AssumeDownloadConsent) {
+            Start-CLIProxyAPI
+        }
+        else {
+            $script:State.version = $previousVersion
+            $script:State.arch = $previousArch
+            Export-State | Out-Null
         }
     }
     catch {
@@ -1262,51 +1404,70 @@ function Open-ApplicationFolder {
     Start-Process -FilePath "explorer.exe" -ArgumentList "`"$($script:Paths.BaseDir)`""
 }
 
+function Open-ConfigFile {
+    <#
+    .SYNOPSIS
+        Open config.yaml in the default editor.
+    #>
+    if (-not (Test-Path -LiteralPath $script:Paths.Config)) {
+        Show-BalloonTip "config.yaml not found" -Icon Warning -Duration 1500
+        return
+    }
+
+    Start-Process -FilePath $script:Paths.Config
+}
+
+function Open-ProjectPage {
+    <#
+    .SYNOPSIS
+        Open the CLIProxyAPI Tray project page in the default browser.
+    #>
+    Start-Process $script:Config.ProjectUrl
+}
+
 function Update-TrayState {
     <#
     .SYNOPSIS
-        Update tray icon and menu state based on running channel
+        Update tray icon and menu state based on service status
     #>
-    $activeChannel = Get-ActiveChannel
+    $isRunning = Test-CLIProxyAPIRunning
 
-    # Update channel checkmarks
-    $script:MenuItems.ChannelMain.Checked = ($script:State.lastChannel -eq "main")
-    $script:MenuItems.ChannelPlus.Checked = ($script:State.lastChannel -eq "plus")
     if ($script:MenuItems.AutoOpenWebUI) {
         $script:MenuItems.AutoOpenWebUI.Checked = [bool]$script:State.autoOpenWebUI
     }
+    if ($script:MenuItems.AutoUpdate) {
+        $script:MenuItems.AutoUpdate.Checked = [bool]$script:State.autoUpdate
+    }
+
+    if ($script:MenuItems.OpenConfig) {
+        $script:MenuItems.OpenConfig.Enabled = Test-Path -LiteralPath $script:Paths.Config
+    }
 
     # Update status display
-    if ($activeChannel -eq "main") {
+    if ($isRunning) {
         $version = if ($script:State.version) { $script:State.version } else { "v?" }
-        $script:MenuItems.CurrentStatus.Text = "Current : Main ($version)"
-        $script:TrayIcon.Text = "$($script:Config.AppName) - Main"
+        $script:MenuItems.CurrentStatus.Text = "Running ($version)"
+        $script:TrayIcon.Text = "$($script:Config.AppName) - Running"
 
-        if ($script:State.lastChannel -ne "main") {
-            $script:State.lastChannel = "main"
-            Export-State | Out-Null
+        if ($script:MenuItems.Start) {
+            $script:MenuItems.Start.Enabled = $false
         }
-
-        $script:MenuItems.Restart.Enabled = $true
-        $script:MenuItems.Stop.Enabled = $true
-    }
-    elseif ($activeChannel -eq "plus") {
-        $plusVersion = if ($script:State.plusTag) { $script:State.plusTag } else { "v?-0" }
-        $script:MenuItems.CurrentStatus.Text = "Current : Plus ($plusVersion)"
-        $script:TrayIcon.Text = "$($script:Config.AppName) - Plus"
-
-        if ($script:State.lastChannel -ne "plus") {
-            $script:State.lastChannel = "plus"
-            Export-State | Out-Null
+        if ($script:MenuItems.OpenWebUI) {
+            $script:MenuItems.OpenWebUI.Enabled = $true
         }
-
         $script:MenuItems.Restart.Enabled = $true
         $script:MenuItems.Stop.Enabled = $true
     }
     else {
-        $script:MenuItems.CurrentStatus.Text = "Current : Not Running"
+        $script:MenuItems.CurrentStatus.Text = "Not Running"
         $script:TrayIcon.Text = $script:Config.AppName
 
+        if ($script:MenuItems.Start) {
+            $script:MenuItems.Start.Enabled = $true
+        }
+        if ($script:MenuItems.OpenWebUI) {
+            $script:MenuItems.OpenWebUI.Enabled = $false
+        }
         $script:MenuItems.Restart.Enabled = $false
         $script:MenuItems.Stop.Enabled = $false
     }
@@ -1327,50 +1488,72 @@ function New-TrayMenu {
     # Current status (disabled label)
     $script:MenuItems.CurrentStatus = New-Object System.Windows.Forms.ToolStripMenuItem
     $script:MenuItems.CurrentStatus.Enabled = $false
-    $script:MenuItems.CurrentStatus.Text = "Current : Not Running"
+    $script:MenuItems.CurrentStatus.Text = "Not Running"
     $menu.Items.Add($script:MenuItems.CurrentStatus) | Out-Null
 
     $menu.Items.Add("-") | Out-Null
 
-    # Channel submenu
-    $channelMenu = New-Object System.Windows.Forms.ToolStripMenuItem
-    $channelMenu.Text = "Channel"
+    $script:MenuItems.Start = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.Start.Text = "Start"
+    $script:MenuItems.Start.Add_Click({ Start-CLIProxyAPI })
+    $menu.Items.Add($script:MenuItems.Start) | Out-Null
 
-    $script:MenuItems.ChannelMain = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.ChannelMain.Text = "Main"
-    $script:MenuItems.ChannelMain.Add_Click({
-        Start-Channel -Channel "main"
+    $script:MenuItems.Restart = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.Restart.Text = "Restart"
+    $script:MenuItems.Restart.Add_Click({ Restart-CLIProxyAPI })
+    $menu.Items.Add($script:MenuItems.Restart) | Out-Null
+
+    $script:MenuItems.Stop = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.Stop.Text = "Stop"
+    $script:MenuItems.Stop.Add_Click({
+        Stop-CLIProxyAPI
+        Update-TrayState
+        Show-BalloonTip "Stopped" -Icon Info -Duration 1200
     })
+    $menu.Items.Add($script:MenuItems.Stop) | Out-Null
 
-    $script:MenuItems.ChannelPlus = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.ChannelPlus.Text = "Plus"
-    $script:MenuItems.ChannelPlus.Add_Click({
-        Start-Channel -Channel "plus"
-    })
+    $menu.Items.Add("-") | Out-Null
 
-    $channelMenu.DropDownItems.Add($script:MenuItems.ChannelMain) | Out-Null
-    $channelMenu.DropDownItems.Add($script:MenuItems.ChannelPlus) | Out-Null
-    $menu.Items.Add($channelMenu) | Out-Null
-
-    # Open submenu
     $openMenu = New-Object System.Windows.Forms.ToolStripMenuItem
     $openMenu.Text = "Open"
 
-    $openWebItem = New-Object System.Windows.Forms.ToolStripMenuItem
-    $openWebItem.Text = "WebUI"
-    $openWebItem.Add_Click({ Open-WebUI })
+    $script:MenuItems.OpenWebUI = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.OpenWebUI.Text = "WebUI"
+    $script:MenuItems.OpenWebUI.Add_Click({ Open-WebUI })
+    $openMenu.DropDownItems.Add($script:MenuItems.OpenWebUI) | Out-Null
 
     $openFolderItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $openFolderItem.Text = "Folder"
     $openFolderItem.Add_Click({ Open-ApplicationFolder })
-
-    $openMenu.DropDownItems.Add($openWebItem) | Out-Null
     $openMenu.DropDownItems.Add($openFolderItem) | Out-Null
+
+    $script:MenuItems.OpenConfig = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.OpenConfig.Text = "Config"
+    $script:MenuItems.OpenConfig.Add_Click({ Open-ConfigFile })
+    $openMenu.DropDownItems.Add($script:MenuItems.OpenConfig) | Out-Null
     $menu.Items.Add($openMenu) | Out-Null
 
-    $menu.Items.Add("-") | Out-Null
+    $settingsMenu = New-Object System.Windows.Forms.ToolStripMenuItem
+    $settingsMenu.Text = "Settings"
 
-    # Reset Password
+    $script:MenuItems.AutoOpenWebUI = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.AutoOpenWebUI.Text = "Auto Open WebUI"
+    $script:MenuItems.AutoOpenWebUI.Add_Click({
+        $script:State.autoOpenWebUI = -not [bool]$script:State.autoOpenWebUI
+        Export-State | Out-Null
+        Update-TrayState
+    })
+    $settingsMenu.DropDownItems.Add($script:MenuItems.AutoOpenWebUI) | Out-Null
+
+    $script:MenuItems.AutoUpdate = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:MenuItems.AutoUpdate.Text = "Auto Update"
+    $script:MenuItems.AutoUpdate.Add_Click({
+        $script:State.autoUpdate = -not [bool]$script:State.autoUpdate
+        Export-State | Out-Null
+        Update-TrayState
+    })
+    $settingsMenu.DropDownItems.Add($script:MenuItems.AutoUpdate) | Out-Null
+
     $resetPasswordItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $resetPasswordItem.Text = "Reset Password"
     $resetPasswordItem.Add_Click({
@@ -1391,46 +1574,27 @@ function New-TrayMenu {
             Show-BalloonTip "Failed to update password" -Icon Error -Duration 2000
         }
     })
-    $menu.Items.Add($resetPasswordItem) | Out-Null
+    $settingsMenu.DropDownItems.Add($resetPasswordItem) | Out-Null
+    $menu.Items.Add($settingsMenu) | Out-Null
 
-    $script:MenuItems.AutoOpenWebUI = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.AutoOpenWebUI.Text = "Auto Open WebUI"
-    $script:MenuItems.AutoOpenWebUI.Add_Click({
-        $script:State.autoOpenWebUI = -not [bool]$script:State.autoOpenWebUI
-        Export-State | Out-Null
-        Update-TrayState
-    })
-    $menu.Items.Add($script:MenuItems.AutoOpenWebUI) | Out-Null
+    $menu.Items.Add("-") | Out-Null
 
-    # Update
+    $aboutItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $aboutItem.Text = "About"
+    $aboutItem.Add_Click({ Open-ProjectPage })
+
     $script:MenuItems.Update = New-Object System.Windows.Forms.ToolStripMenuItem
     $script:MenuItems.Update.Text = "Update"
     $script:MenuItems.Update.Add_Click({ Invoke-Update })
+
     $menu.Items.Add($script:MenuItems.Update) | Out-Null
-
-    # Restart
-    $script:MenuItems.Restart = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.Restart.Text = "Restart"
-    $script:MenuItems.Restart.Add_Click({ Restart-Channel })
-    $menu.Items.Add($script:MenuItems.Restart) | Out-Null
-
-    # Stop
-    $script:MenuItems.Stop = New-Object System.Windows.Forms.ToolStripMenuItem
-    $script:MenuItems.Stop.Text = "Stop"
-    $script:MenuItems.Stop.Add_Click({
-        Stop-AllChannels
-        Update-TrayState
-        Show-BalloonTip "Stopped" -Icon Info -Duration 1200
-    })
-    $menu.Items.Add($script:MenuItems.Stop) | Out-Null
-
-    $menu.Items.Add("-") | Out-Null
+    $menu.Items.Add($aboutItem) | Out-Null
 
     # Exit
     $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $exitItem.Text = "Exit"
     $exitItem.Add_Click({
-        Stop-AllChannels
+        Stop-CLIProxyAPI
         $script:UpdateTimer.Stop()
         $script:TrayIcon.Visible = $false
         [System.Windows.Forms.Application]::Exit()
@@ -1441,19 +1605,57 @@ function New-TrayMenu {
 }
 #endregion
 
-#region Main Execution
+#region Entry Point
+function Stop-TrayApplication {
+    <#
+    .SYNOPSIS
+        Release tray application resources.
+    #>
+    try {
+        if ($script:UpdateTimer) {
+            $script:UpdateTimer.Stop()
+            $script:UpdateTimer.Dispose()
+        }
+    }
+    catch {
+        Write-Verbose "Failed to dispose update timer"
+    }
+
+    try {
+        if ($script:TrayIcon) {
+            $script:TrayIcon.Visible = $false
+            if ($script:TrayIcon.Icon) {
+                $script:TrayIcon.Icon.Dispose()
+            }
+            $script:TrayIcon.Dispose()
+        }
+    }
+    catch {
+        Write-Verbose "Failed to dispose tray icon"
+    }
+
+    try {
+        if ($script:AppMutex) {
+            $script:AppMutex.ReleaseMutex()
+            $script:AppMutex.Dispose()
+        }
+    }
+    catch {
+        Write-Verbose "Failed to release application mutex"
+    }
+}
+
+try {
 # Build and attach menu
 $script:TrayIcon.ContextMenuStrip = New-TrayMenu
 
 # Double-click tray icon handler
 $script:TrayIcon.add_DoubleClick({
-    $activeChannel = Get-ActiveChannel
-
-    if ($activeChannel -ne "") {
+    if (Test-CLIProxyAPIRunning) {
         Open-WebUI
     }
     else {
-        Start-Channel -Channel $script:State.lastChannel
+        Start-CLIProxyAPI
     }
 })
 
@@ -1480,8 +1682,13 @@ Test-PasswordConfigured | Out-Null
 # Update initial UI state
 Update-TrayState
 
+if ([bool]$script:State.autoUpdate) {
+    Invoke-AutoUpdate | Out-Null
+    Update-TrayState
+}
+
 # Auto-start behavior
-if ((Get-ActiveChannel) -ne "") {
+if (Test-CLIProxyAPIRunning) {
     # Already running, just open WebUI
     if ($script:State.autoOpenWebUI) {
         Open-WebUI
@@ -1490,7 +1697,7 @@ if ((Get-ActiveChannel) -ne "") {
 else {
     # Not running, ensure version and start
     if (Test-VersionInstalled) {
-        Start-Channel -Channel $script:State.lastChannel
+        Start-CLIProxyAPI
     }
     else {
         Update-TrayState
@@ -1499,8 +1706,8 @@ else {
 
 # Run message loop
 [System.Windows.Forms.Application]::Run()
-
-# Cleanup
-$script:UpdateTimer.Stop()
-$script:TrayIcon.Visible = $false
+}
+finally {
+    Stop-TrayApplication
+}
 #endregion

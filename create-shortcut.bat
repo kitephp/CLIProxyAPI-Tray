@@ -1,35 +1,21 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
-REM --- Resolve current folder and target vbs ---
 set "DIR=%~dp0"
-set "VBS=%DIR%cli-proxy-api.vbs"
+set "INSTALLER=%DIR%install.ps1"
 
-if not exist "%VBS%" (
-  echo Not found: %VBS%
+if not exist "%INSTALLER%" (
+  echo Not found: %INSTALLER%
   pause
   exit /b 1
 )
 
-REM --- Desktop shortcut path ---
-set "DESK=%USERPROFILE%\Desktop"
-set "LNK=%DESK%\CLIProxyAPI Tray.lnk"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%"
+set "EXITCODE=%ERRORLEVEL%"
 
-REM --- Create shortcut via PowerShell + WScript.Shell COM ---
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ws = New-Object -ComObject WScript.Shell; " ^
-  "$s = $ws.CreateShortcut('%LNK%'); " ^
-  "$s.TargetPath = 'wscript.exe'; " ^
-  "$s.Arguments = '""%VBS%""'; " ^
-  "$s.WorkingDirectory = '%DIR%'; " ^
-  "$s.IconLocation = '%SystemRoot%\System32\shell32.dll,44'; " ^
-  "$s.Save()"
-
-if exist "%LNK%" (
-  echo Shortcut created: "%LNK%"
-) else (
-  echo Failed to create shortcut.
+if not "%EXITCODE%"=="0" (
+  echo Failed to create shortcut. Exit code: %EXITCODE%
 )
 
 pause
-endlocal
+exit /b %EXITCODE%

@@ -1,4 +1,6 @@
 static/
 versions/
+settings.json
 state.json
 config.yaml
+.ace-tool/
